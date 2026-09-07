@@ -1,16 +1,20 @@
 use crate::action::{Action, PhaseResult};
-use crate::cmd::{which_bin};
+use crate::cmd::{run_command, which_bin};
 use crate::config::Config;
 use crate::safety::{matches_protect, resolve_protect_globs};
 use crate::util::{
     days_to_seconds, dir_size, file_age_ok_for_delete, iter_files, newest_activity, now_ts,
 };
+use std::path::PathBuf;
 
 pub fn phase_caches(cfg: &Config) -> PhaseResult {
     let mut result = PhaseResult::new("caches");
     let protect = resolve_protect_globs(cfg);
     let cutoff = now_ts() - days_to_seconds(cfg.file_unused_days);
     let cache_root = cfg.home.join(".cache");
+
+    // Age-based cleanup of ~/.cache (covers pip/uv/npm dirs without requiring those CLIs).
+    let _ = cfg.include_pkg_managers;
 
     if cache_root.is_dir() {
         if let Ok(entries) = std::fs::read_dir(&cache_root) {
@@ -58,54 +62,41 @@ pub fn phase_caches(cfg: &Config) -> PhaseResult {
         }
     }
 
-    if cfg.include_pkg_managers {
-        let mut pkg_cmds: Vec<(&str, Vec<String>)> = Vec::new();
-        if which_bin("uv").is_some() {
-            pkg_cmds.push(("uv_cache_prune", vec!["uv".into(), "cache".into(), "prune".into()]));
-        }
-        if which_bin("pip").is_some() {
-            pkg_cmds.push(("pip_cache_purge", vec!["pip".into(), "cache".into(), "purge".into()]));
-        }
-        if which_bin("npm").is_some() {
-            pkg_cmds.push((
-                "npm_cache_clean",
-                vec!["npm".into(), "cache".into(), "clean".into(), "--force".into()],
-            ));
-        }
-        if which_bin("cargo-cache").is_some() {
-            pkg_cmds.push(("cargo_cache", vec!["cargo-cache".into(), "-a".into()]));
-        }
-        for (name, cmd) in pkg_cmds {
-            result.add(
-                Action::new("caches", "cache_cmd", name, 0, "package manager cache (opt-in)")
-                    .with_command(cmd),
-            );
-        }
-    }
-
     #[cfg(unix)]
     {
         if is_root() {
             if which_bin("apt-get").is_some() {
-                result.add(
-                    Action::new("caches", "cache_cmd", "apt_clean", 0, "apt clean")
-                        .with_command(vec!["apt-get".into(), "clean".into()]),
-                );
+                let archives = PathBuf::from("/var/cache/apt/archives");
+                let size = if archives.is_dir() {
+                    dir_size(&archives)
+                } else {
+                    0
+                };
+                if size > 0 {
+                    result.add(
+                        Action::new("caches", "cache_cmd", "apt_clean", size, "apt clean")
+                            .with_command(vec!["apt-get".into(), "clean".into()]),
+                    );
+                }
             }
             if which_bin("journalctl").is_some() {
-                result.add(
-                    Action::new(
-                        "caches",
-                        "cache_cmd",
-                        "journal_vacuum",
-                        0,
-                        format!("vacuum {}", cfg.journal_vacuum),
-                    )
-                    .with_command(vec![
-                        "journalctl".into(),
-                        format!("--vacuum-time={}", cfg.journal_vacuum),
-                    ]),
-                );
+                if let Some(size) = journal_disk_usage(cfg) {
+                    if size > 0 {
+                        result.add(
+                            Action::new(
+                                "caches",
+                                "cache_cmd",
+                                "journal_vacuum",
+                                size,
+                                format!("vacuum {}", cfg.journal_vacuum),
+                            )
+                            .with_command(vec![
+                                "journalctl".into(),
+                                format!("--vacuum-time={}", cfg.journal_vacuum),
+                            ]),
+                        );
+                    }
+                }
             }
         }
     }
@@ -131,6 +122,25 @@ pub fn phase_caches(cfg: &Config) -> PhaseResult {
     }
 
     result
+}
+
+fn journal_disk_usage(cfg: &Config) -> Option<u64> {
+    let cp = run_command(&["journalctl".into(), "--disk-usage".into()], cfg);
+    if cp.status != 0 {
+        return None;
+    }
+    let re = regex::Regex::new(r"(?i)take up\s+([0-9.]+)\s*([KMGT]?i?B?)").ok()?;
+    let caps = re.captures(&cp.stdout)?;
+    let num = &caps[1];
+    let unit = caps.get(2).map(|m| m.as_str()).unwrap_or("B");
+    let unit = unit.replace('i', "").replace('I', "");
+    let u = unit.trim().to_uppercase().replace('B', "");
+    let token = if u.is_empty() {
+        num.to_string()
+    } else {
+        format!("{num}{u}")
+    };
+    crate::util::parse_size(&token).ok()
 }
 
 #[cfg(unix)]

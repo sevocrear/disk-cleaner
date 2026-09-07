@@ -64,6 +64,72 @@ pub fn docker_until_filter(days: u32) -> String {
     format!("until={hours}h")
 }
 
+/// Parse a Docker reclaimable field like `1.234GB (50%)` or `0B`.
+pub fn parse_docker_reclaimable_field(field: &str) -> Option<u64> {
+    let token = field.trim().split_whitespace().next()?;
+    parse_size(token).ok()
+}
+
+/// Parse `docker system df --format '{{.Type}}\t{{.Reclaimable}}'` into type → bytes.
+pub fn parse_docker_system_df(stdout: &str) -> std::collections::HashMap<String, u64> {
+    let mut map = std::collections::HashMap::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((ty, reclaim)) = line.split_once('\t') else {
+            continue;
+        };
+        if let Some(bytes) = parse_docker_reclaimable_field(reclaim) {
+            map.insert(ty.trim().to_string(), bytes);
+        }
+    }
+    map
+}
+
+/// Sum sizes of unused volumes (LINKS == 0) from `docker system df -v` output.
+pub fn unused_volume_bytes_from_df_v(stdout: &str) -> (u64, usize) {
+    let mut total = 0u64;
+    let mut count = 0usize;
+    let mut in_volumes = false;
+    for line in stdout.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.starts_with("Local Volumes space usage") {
+            in_volumes = true;
+            continue;
+        }
+        if !in_volumes {
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with("VOLUME NAME") {
+            continue;
+        }
+        if trimmed.starts_with("Images space")
+            || trimmed.starts_with("Containers space")
+            || trimmed.starts_with("Build cache")
+            || trimmed.starts_with("Build Cache")
+        {
+            break;
+        }
+        // VOLUME NAME may contain spaces; LINKS and SIZE are the last two fields.
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let links = parts[parts.len() - 2];
+        let size_tok = parts[parts.len() - 1];
+        if links != "0" {
+            continue;
+        }
+        count += 1;
+        if let Some(bytes) = parse_docker_reclaimable_field(size_tok) {
+            total = total.saturating_add(bytes);
+        }
+    }
+    (total, count)
+}
+
 pub fn iter_files(root: &Path, cross_fs: bool) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if !root.exists() {
@@ -254,5 +320,48 @@ mod tests {
 
         let n = parse_size("3.4Gb").unwrap();
         assert_eq!(parse_size(&format_bytes(n)).unwrap(), n);
+    }
+
+    #[test]
+    fn docker_reclaimable_and_system_df() {
+        assert_eq!(parse_docker_reclaimable_field("0B").unwrap(), 0);
+        assert_eq!(
+            parse_docker_reclaimable_field("1.5GB (45%)").unwrap(),
+            parse_size("1.5G").unwrap()
+        );
+        assert_eq!(
+            parse_docker_reclaimable_field("512MB (10%)").unwrap(),
+            parse_size("512M").unwrap()
+        );
+
+        let df = parse_docker_system_df(
+            "Containers\t0B (0%)\nImages\t1.0GB (50%)\nLocal Volumes\t2.5GB (100%)\nBuild Cache\t0B (0%)\n",
+        );
+        assert_eq!(df.get("Containers").copied(), Some(0));
+        assert_eq!(df.get("Images").copied(), Some(parse_size("1G").unwrap()));
+        assert_eq!(
+            df.get("Local Volumes").copied(),
+            Some(parse_size("2.5G").unwrap())
+        );
+        assert_eq!(df.get("Build Cache").copied(), Some(0));
+    }
+
+    #[test]
+    fn unused_volumes_from_df_v() {
+        let sample = r#"
+Local Volumes space usage:
+
+VOLUME NAME                              LINKS     SIZE
+keep-me                                  2         1.0GB
+anon-empty                               0         0B
+named-big                                0         9.678GB
+other                                    0         512MB
+"#;
+        let (bytes, count) = unused_volume_bytes_from_df_v(sample);
+        assert_eq!(count, 3);
+        assert_eq!(
+            bytes,
+            parse_size("9.678G").unwrap() + parse_size("512M").unwrap()
+        );
     }
 }

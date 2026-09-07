@@ -3,7 +3,7 @@ use disk_cleaner_engine::config::Config;
 use disk_cleaner_engine::disks::{list_disks as eng_disks, DiskInfo};
 use disk_cleaner_engine::execute::execute_actions;
 use disk_cleaner_engine::report::write_report;
-use disk_cleaner_engine::run::run_phases_with_progress;
+use disk_cleaner_engine::run::run_phases_parallel;
 use disk_cleaner_engine::trash::{
     delete_trash_item, empty_trash as eng_empty, list_trash as eng_trash, restore_trash_item,
     TrashItem,
@@ -28,6 +28,11 @@ impl Default for AppState {
 #[derive(Clone, Serialize)]
 pub struct ScanProgress {
     pub phase: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct ScanPhaseDone {
+    pub result: PhaseResult,
 }
 
 #[derive(Clone, Serialize)]
@@ -87,14 +92,26 @@ pub async fn start_scan(
     config.apply = false;
     let app2 = app.clone();
     let results = tauri::async_runtime::spawn_blocking(move || {
-        run_phases_with_progress(&config, |phase| {
-            let _ = app2.emit(
-                "scan-progress",
-                ScanProgress {
-                    phase: phase.to_string(),
-                },
-            );
-        })
+        run_phases_parallel(
+            &config,
+            |phase| {
+                let _ = app2.emit(
+                    "scan-phase-start",
+                    ScanProgress {
+                        phase: phase.to_string(),
+                    },
+                );
+                let _ = app2.emit(
+                    "scan-progress",
+                    ScanProgress {
+                        phase: phase.to_string(),
+                    },
+                );
+            },
+            |result| {
+                let _ = app2.emit("scan-phase-done", ScanPhaseDone { result });
+            },
+        )
     })
     .await
     .map_err(|e| e.to_string())?;

@@ -14,6 +14,6 @@ pub mod util;
 
 pub use action::{Action, PhaseResult};
 pub use config::Config;
-pub use run::{run_phases, should_run_phase, PHASE_ORDER};
+pub use run::{run_phases, run_phases_parallel, should_run_phase, PHASE_ORDER};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
