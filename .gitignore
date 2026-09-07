@@ -12,3 +12,4 @@ src-tauri/target/
 .vscode/
 .env
 .env.*
+*.tsbuildinfo
