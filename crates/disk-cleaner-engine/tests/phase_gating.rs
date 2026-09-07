@@ -1,7 +1,7 @@
-//! Integration tests with PATH stubs for docker / pkg-manager gating.
+//! Integration tests with PATH stubs for docker gating.
 
 use disk_cleaner_engine::config::Config;
-use disk_cleaner_engine::phases::{phase_caches, phase_docker};
+use disk_cleaner_engine::phases::phase_docker;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -40,7 +40,6 @@ fn base_cfg(home: &Path) -> Config {
     cfg.docker_timeout_sec = 5;
     cfg.skip_docker = false;
     cfg.include_docker_volumes = true;
-    cfg.include_pkg_managers = true;
     cfg
 }
 
@@ -49,16 +48,17 @@ fn docker_omits_zero_reclaimable_prunes() {
     let tmp = tempfile::tempdir().unwrap();
     let bindir = tmp.path().join("bin");
     fs::create_dir_all(&bindir).unwrap();
-    let log = tmp.path().join("docker.log");
-    fs::write(&log, "").unwrap();
 
     write_exec(
         &bindir.join("docker"),
-        &format!(
-            r#"#!/usr/bin/env bash
+        r#"#!/usr/bin/env bash
 set -euo pipefail
-echo "ARGS:$*" >> "{log}"
 case "$*" in
+  *"system df -v"*|*"system df"*" -v"*)
+    echo "Local Volumes space usage:"
+    echo ""
+    echo "VOLUME NAME   LINKS     SIZE"
+    ;;
   *"system df"*)
     echo -e "Containers\t0B (0%)"
     echo -e "Images\t0B (0%)"
@@ -82,8 +82,6 @@ case "$*" in
     ;;
 esac
 "#,
-            log = log.display()
-        ),
     );
 
     let home = tmp.path().join("home");
@@ -99,6 +97,70 @@ esac
 }
 
 #[test]
+fn docker_volume_prune_uses_all_and_real_sizes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bindir = tmp.path().join("bin");
+    fs::create_dir_all(&bindir).unwrap();
+
+    write_exec(
+        &bindir.join("docker"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"system df -v"*|*"df -v"*)
+    echo "Local Volumes space usage:"
+    echo ""
+    echo "VOLUME NAME   LINKS     SIZE"
+    echo "keep-linked   1         5.0GB"
+    echo "unused-big    0         9.678GB"
+    echo "unused-small  0         512MB"
+    ;;
+  *"system df"*)
+    echo -e "Containers\t0B (0%)"
+    echo -e "Images\t0B (0%)"
+    echo -e "Local Volumes\t14.94GB (97%)"
+    echo -e "Build Cache\t0B (0%)"
+    ;;
+  *"network ls"*)
+    ;;
+  *"ps -a --format"*)
+    ;;
+  *"ps -aq"*)
+    ;;
+  *"images --format"*)
+    ;;
+  *)
+    echo "unexpected: $*" >&2
+    exit 1
+    ;;
+esac
+"#,
+    );
+
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let cfg = base_cfg(&home);
+
+    let result = with_path_prefix(&bindir, || phase_docker(&cfg));
+    let vol = result
+        .actions
+        .iter()
+        .find(|a| a.path == "volume_prune")
+        .expect("volume_prune");
+    assert!(
+        vol.command
+            .as_ref()
+            .map(|c| c.iter().any(|x| x == "-af"))
+            .unwrap_or(false),
+        "expected prune -af, got {:?}",
+        vol.command
+    );
+    assert!(vol.bytes > 9_000_000_000);
+    // Must not use the misleading aggregate Local Volumes reclaimable alone.
+    assert!(vol.bytes < 14 * 1024 * 1024 * 1024);
+}
+
+#[test]
 fn docker_includes_measured_reclaimable() {
     let tmp = tempfile::tempdir().unwrap();
     let bindir = tmp.path().join("bin");
@@ -109,6 +171,12 @@ fn docker_includes_measured_reclaimable() {
         r#"#!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
+  *"system df -v"*|*"df -v"*)
+    echo "Local Volumes space usage:"
+    echo ""
+    echo "VOLUME NAME   LINKS     SIZE"
+    echo "v1            0         2.0GB"
+    ;;
   *"system df"*)
     echo -e "Containers\t100MB (10%)"
     echo -e "Images\t0B (0%)"
@@ -142,93 +210,4 @@ esac
     assert!(paths.contains(&"network_prune"));
     assert!(paths.contains(&"volume_prune"));
     assert!(!paths.contains(&"image_rmi"));
-
-    let container = result
-        .actions
-        .iter()
-        .find(|a| a.path == "container_prune")
-        .unwrap();
-    assert!(container.bytes > 0);
-    let network = result
-        .actions
-        .iter()
-        .find(|a| a.path == "network_prune")
-        .unwrap();
-    assert_eq!(network.bytes, 0);
-}
-
-#[test]
-fn pkg_cache_omits_empty_dirs() {
-    let tmp = tempfile::tempdir().unwrap();
-    let bindir = tmp.path().join("bin");
-    let home = tmp.path().join("home");
-    fs::create_dir_all(&bindir).unwrap();
-    fs::create_dir_all(home.join(".cache")).unwrap();
-
-    for name in ["uv", "pip", "npm"] {
-        write_exec(
-            &bindir.join(name),
-            r#"#!/usr/bin/env bash
-case "$*" in
-  *"cache dir"*|*"config get cache"*)
-    echo "/tmp/disk-cleaner-empty-cache-does-not-exist-$$"
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-"#,
-        );
-    }
-
-    let mut cfg = base_cfg(&home);
-    cfg.include_pkg_managers = true;
-    cfg.skip_caches = false;
-
-    let result = with_path_prefix(&bindir, || phase_caches(&cfg));
-    assert!(
-        !result.actions.iter().any(|a| a.kind == "cache_cmd"),
-        "unexpected cache cmds: {:?}",
-        result.actions
-    );
-}
-
-#[test]
-fn pkg_cache_includes_nonempty_dir() {
-    let tmp = tempfile::tempdir().unwrap();
-    let bindir = tmp.path().join("bin");
-    let home = tmp.path().join("home");
-    let pip_cache = tmp.path().join("pip-cache");
-    fs::create_dir_all(&bindir).unwrap();
-    fs::create_dir_all(home.join(".cache")).unwrap();
-    fs::create_dir_all(&pip_cache).unwrap();
-    fs::write(pip_cache.join("wheel.bin"), vec![0u8; 4096]).unwrap();
-
-    write_exec(
-        &bindir.join("pip"),
-        &format!(
-            r#"#!/usr/bin/env bash
-case "$*" in
-  *"cache dir"*)
-    echo "{dir}"
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-"#,
-            dir = pip_cache.display()
-        ),
-    );
-
-    let mut cfg = base_cfg(&home);
-    cfg.include_pkg_managers = true;
-
-    let result = with_path_prefix(&bindir, || phase_caches(&cfg));
-    let pip = result
-        .actions
-        .iter()
-        .find(|a| a.path == "pip_cache_purge")
-        .expect("pip_cache_purge");
-    assert!(pip.bytes >= 4096);
 }

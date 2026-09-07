@@ -105,11 +105,9 @@ const SETTING_TIPS: Record<string, string> = {
   "Move cleaned files to Trash (safer)":
     "GUI clean moves items to Trash instead of permanent delete. You can restore from the Trash panel.",
   "Include Docker volumes":
-    "Also prune unused Docker volumes. Off by default — volumes can hold important data.",
+    "Also remove unused Docker volumes (named and anonymous). Off by default — volumes can hold app data.",
   "Allow HuggingFace / torch cache cleanup":
     "Allow reclaiming HuggingFace / torch / transformers caches that are normally protected.",
-  "Include package manager cache prune":
-    "Also run uv/pip/npm cache prune. Can hang for a long time; off by default.",
 };
 
 export default function App() {
@@ -849,12 +847,6 @@ function SettingsPanel({
           tip={SETTING_TIPS["Allow HuggingFace / torch cache cleanup"]}
           checked={config.include_hf_cache}
           onChange={(v) => setConfig({ ...config, include_hf_cache: v })}
-        />
-        <CheckOption
-          label="Include package manager cache prune"
-          tip={SETTING_TIPS["Include package manager cache prune"]}
-          checked={config.include_pkg_managers}
-          onChange={(v) => setConfig({ ...config, include_pkg_managers: v })}
         />
       </div>
       <div>

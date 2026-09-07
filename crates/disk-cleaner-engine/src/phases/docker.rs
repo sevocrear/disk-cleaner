@@ -154,27 +154,41 @@ pub fn phase_docker(cfg: &Config) -> PhaseResult {
     }
 
     if cfg.include_docker_volumes {
-        let volumes_est = df.get("Local Volumes").copied().unwrap_or(0);
-        if volumes_est > 0 {
+        // Docker 23+: `volume prune` without -a only removes anonymous volumes.
+        // Named unused volumes (most of Local Volumes "reclaimable") need --all.
+        let vcp = run_command(
+            &["docker".into(), "system".into(), "df".into(), "-v".into()],
+            cfg,
+        );
+        let (vol_bytes, vol_count) = if vcp.status == 0 {
+            crate::util::unused_volume_bytes_from_df_v(&vcp.stdout)
+        } else {
+            (0, 0)
+        };
+        if vol_count > 0 && vol_bytes > 0 {
             result.add(
                 Action::new(
                     "docker",
                     "docker_cmd",
                     "volume_prune",
-                    volumes_est,
-                    "unused volumes (opt-in)",
+                    vol_bytes,
+                    format!("unused volumes · {vol_count} volumes (named+anonymous)"),
                 )
                 .with_command(vec![
                     "docker".into(),
                     "volume".into(),
                     "prune".into(),
-                    "-f".into(),
+                    "-af".into(),
                 ]),
             );
+        } else if vol_count > 0 {
+            result.notes.push(format!(
+                "{vol_count} unused volumes but size 0 (skipped volume_prune)"
+            ));
         } else {
             result
                 .notes
-                .push("no reclaimable volumes (skipped volume_prune)".into());
+                .push("no unused volumes (skipped volume_prune)".into());
         }
     }
 
