@@ -38,6 +38,18 @@ jobs:
             build-essential \
             pkg-config
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build UI (required for Tauri frontendDist)
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
       - name: Engine unit tests
         run: cargo test -p disk-cleaner-engine --all-targets
 
@@ -58,7 +70,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
