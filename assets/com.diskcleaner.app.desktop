@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Disk Cleaner
+GenericName=Disk Cleaner
+Comment=Soft pastel disk cleaner — scan, review, and free space
+Exec=disk-cleaner-app
+Icon=com.diskcleaner.app
+Terminal=false
+Categories=Utility;Filesystem;
+StartupWMClass=com.diskcleaner.app
+Keywords=disk;clean;storage;trash;docker;

@@ -1,0 +1,14 @@
+/target/
+/dist/
+/ui/node_modules/
+/ui/dist/
+/.deps/
+**/__pycache__/
+*.pyc
+.DS_Store
+src-tauri/target/
+*.log
+.idea/
+.vscode/
+.env
+.env.*
