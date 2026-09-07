@@ -100,6 +100,19 @@ cd ui && npm install && npm run build && cd ..
 cargo run --release -p disk-cleaner-app
 ```
 
+## CI
+
+GitHub Actions runs on every push and pull request to `main`:
+
+- `cargo test` (engine) + `cargo check --workspace`
+- UI `npm ci && npm run build` (TypeScript + Vite)
+
+Block a bad push locally (optional):
+
+```bash
+ln -sf ../../scripts/pre-push .git/hooks/pre-push
+```
+
 ## Project layout
 
 ```
@@ -110,6 +123,7 @@ ui/                           React UI
 install.sh                    curl | bash installer (GitHub Release)
 scripts/package-linux.sh      release tarball
 scripts/uninstall.sh          remove user install
+scripts/pre-push              local CI gate for git hooks
 reference/host_cleaner.py     original Python reference
 ```
 
