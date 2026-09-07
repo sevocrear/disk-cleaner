@@ -59,6 +59,9 @@ disk-cleaner
 # Apply permanently (CLI deletes for real; confirm large jobs with --yes)
 disk-cleaner --apply --yes
 
+# Parallel delete workers (default: CPU count, clamped 2–8)
+disk-cleaner --apply --yes --jobs 8
+
 # Open the GUI — select items, clean to Trash by default
 disk-cleaner-app
 ```

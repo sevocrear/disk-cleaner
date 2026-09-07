@@ -14,7 +14,7 @@ import {
   formatBytesLocal,
   parseSizeLocal,
 } from "./api";
-import type { Action, ApplySummary, Config, DiskInfo, Panel, PhaseResult, TrashItem } from "./types";
+import type { Action, ApplyProgress, ApplySummary, Config, DiskInfo, Panel, PhaseResult, TrashItem } from "./types";
 
 const NAV: { id: Panel; label: string }[] = [
   { id: "scan", label: "Deep clean" },
@@ -169,7 +169,10 @@ export default function App() {
   const [trash, setTrash] = useState<TrashItem[]>([]);
   const [report, setReport] = useState<ApplySummary | null>(null);
   const [busy, setBusy] = useState(false);
+  const [applyProgress, setApplyProgress] = useState<ApplyProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const applyProgressRef = useRef<ApplyProgress | null>(null);
+  const applyRafRef = useRef<number | null>(null);
 
   useEffect(() => {
     apiGetConfig().then(setConfig).catch((e) => setError(String(e)));
@@ -208,8 +211,22 @@ export default function App() {
       .then((fn) => unsubs.push(fn))
       .catch(() => undefined);
 
+    // Coalesce apply-progress to one React update per animation frame.
+    listen<ApplyProgress>("apply-progress", (e) => {
+      applyProgressRef.current = e.payload;
+      if (applyRafRef.current != null) return;
+      applyRafRef.current = requestAnimationFrame(() => {
+        applyRafRef.current = null;
+        const latest = applyProgressRef.current;
+        if (latest) startTransition(() => setApplyProgress(latest));
+      });
+    })
+      .then((fn) => unsubs.push(fn))
+      .catch(() => undefined);
+
     return () => {
       unsubs.forEach((u) => u());
+      if (applyRafRef.current != null) cancelAnimationFrame(applyRafRef.current);
     };
   }, []);
 
@@ -314,6 +331,13 @@ export default function App() {
     if (!config || selectedActions.length === 0) return;
     setBusy(true);
     setError(null);
+    setApplyProgress({
+      done: 0,
+      total: selectedActions.length,
+      bytes_reclaimed: 0,
+      failures: 0,
+      path: "",
+    });
     try {
       const { summary } = await apiApplySelected(config, selectedActions);
       setReport(summary);
@@ -336,6 +360,8 @@ export default function App() {
       setError(String(e));
     } finally {
       setBusy(false);
+      setApplyProgress(null);
+      applyProgressRef.current = null;
     }
   }
 
@@ -461,15 +487,32 @@ export default function App() {
 
         {(panel === "scan" || panel === "review") && (
           <div className="footer-bar">
-            <div>
+            <div style={{ minWidth: 0, flex: 1 }}>
               <div className="meta">
                 {scanning
                   ? `Scanning ${scanDoneCount}/${scanTotalCount || "…"}`
-                  : `${selectedActions.length} selected`}
+                  : busy && applyProgress
+                    ? `Cleaning ${applyProgress.done.toLocaleString()}/${applyProgress.total.toLocaleString()}${
+                        applyProgress.failures ? ` · ${applyProgress.failures} failed` : ""
+                      }`
+                    : `${selectedActions.length} selected`}
               </div>
               <div className="display-num" style={{ fontSize: "1.6rem" }}>
-                {scanning ? "…" : selectedSizeLabel}
+                {scanning
+                  ? "…"
+                  : busy && applyProgress
+                    ? formatBytesLocal(applyProgress.bytes_reclaimed)
+                    : selectedSizeLabel}
               </div>
+              {busy && applyProgress && applyProgress.total > 0 && (
+                <div className="progress progress-determinate" style={{ marginTop: 8, maxWidth: 280 }}>
+                  <span
+                    style={{
+                      width: `${Math.min(100, (100 * applyProgress.done) / applyProgress.total)}%`,
+                    }}
+                  />
+                </div>
+              )}
             </div>
             <div style={{ display: "flex", gap: 10 }}>
               <button className="btn btn-ghost" onClick={() => setPanel("review")} disabled={!allActions.length && !scanning}>

@@ -542,6 +542,12 @@ button {
   animation: slide 1.1s ease infinite;
 }
 
+.progress-determinate > span {
+  width: 0%;
+  animation: none;
+  transition: width 0.12s linear;
+}
+
 @keyframes slide {
   0% {
     transform: translateX(-120%);
