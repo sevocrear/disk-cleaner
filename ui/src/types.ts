@@ -79,4 +79,12 @@ export type ApplySummary = {
   by_phase: [string, number][];
 };
 
+export type ApplyProgress = {
+  done: number;
+  total: number;
+  bytes_reclaimed: number;
+  failures: number;
+  path: string;
+};
+
 export type Panel = "scan" | "review" | "disks" | "trash" | "settings";

@@ -1,12 +1,15 @@
 use clap::{Parser, Subcommand};
 use disk_cleaner_engine::config::Config;
-use disk_cleaner_engine::execute::execute_actions;
+use disk_cleaner_engine::execute::{default_apply_jobs, execute_actions_parallel};
 use disk_cleaner_engine::report::write_report;
 use disk_cleaner_engine::run::run_phases;
 use disk_cleaner_engine::util::{format_bytes, parse_size};
 use disk_cleaner_engine::VERSION;
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
 #[command(name = "disk-cleaner", version = VERSION, about = "Safe host disk cleaner")]
@@ -19,6 +22,9 @@ struct Cli {
     apply: bool,
     #[arg(long, global = true)]
     yes: bool,
+    /// Parallel filesystem delete workers (default: CPU count, clamped 2–8)
+    #[arg(long, short = 'j', global = true)]
+    jobs: Option<usize>,
     #[arg(long, global = true, default_value_t = 14)]
     docker_unused_days: u32,
     #[arg(long, global = true, default_value_t = 60)]
@@ -147,6 +153,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let jobs = cli.jobs.unwrap_or_else(default_apply_jobs).max(1);
 
     eprintln!("… scanning phases");
     let results = run_phases(&cfg);
@@ -182,13 +189,46 @@ fn main() -> ExitCode {
     }
 
     let all_actions: Vec<_> = results.iter().flat_map(|r| r.actions.clone()).collect();
-    let (log, summary) = execute_actions(&all_actions, &cfg, false);
+    let tty = io::stderr().is_terminal();
+    let last_emit = Mutex::new(Instant::now() - Duration::from_secs(1));
+    let (log, summary) = execute_actions_parallel(&all_actions, &cfg, false, jobs, |p| {
+        if !cfg.apply || p.total == 0 {
+            return;
+        }
+        let force = p.done == p.total || p.done == 1;
+        let mut guard = last_emit.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        if !(force || now.duration_since(*guard) >= Duration::from_millis(150)) {
+            return;
+        }
+        *guard = now;
+        if tty {
+            eprint!(
+                "\r… applying {}/{} ({})   ",
+                p.done,
+                p.total,
+                format_bytes(p.bytes_reclaimed)
+            );
+            let _ = io::stderr().flush();
+        } else if force || p.done % 250 == 0 {
+            eprintln!(
+                "… applying {}/{} ({})",
+                p.done,
+                p.total,
+                format_bytes(p.bytes_reclaimed)
+            );
+        }
+    });
+    if cfg.apply && tty && !all_actions.is_empty() {
+        eprintln!();
+    }
     if cfg.apply {
         println!(
-            "Applied: {} items, ~{} freed, {} failures",
+            "Applied: {} items, ~{} freed, {} failures ({} workers)",
             summary.files_deleted,
             format_bytes(summary.bytes_reclaimed),
-            summary.failures
+            summary.failures,
+            jobs
         );
     }
     match write_report(&cfg, &results, &log) {

@@ -88,3 +88,13 @@ pub struct ApplySummary {
     pub failures: u64,
     pub by_phase: Vec<(String, u64)>,
 }
+
+/// Progress snapshot while applying selected actions.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApplyProgress {
+    pub done: u64,
+    pub total: u64,
+    pub bytes_reclaimed: u64,
+    pub failures: u64,
+    pub path: String,
+}

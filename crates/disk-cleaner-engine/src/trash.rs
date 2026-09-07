@@ -1,6 +1,9 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TRASH_NAME_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrashItem {
@@ -132,10 +135,12 @@ fn unique_trash_name(files_dir: &Path, path: &Path) -> std::io::Result<String> {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "item".into());
-    let mut name = base.clone();
-    let mut i = 1;
+    // Process id + atomic seq keeps parallel workers from colliding on the same name.
+    let seq = TRASH_NAME_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut name = format!("{base}.{}.{}", std::process::id(), seq);
+    let mut i = 1u64;
     while files_dir.join(&name).exists() {
-        name = format!("{base}.{i}");
+        name = format!("{base}.{}.{}.{}", std::process::id(), seq, i);
         i += 1;
     }
     Ok(name)

@@ -1,7 +1,7 @@
 use disk_cleaner_engine::action::{Action, ApplySummary, PhaseResult};
 use disk_cleaner_engine::config::Config;
 use disk_cleaner_engine::disks::{list_disks as eng_disks, DiskInfo};
-use disk_cleaner_engine::execute::execute_actions;
+use disk_cleaner_engine::execute::{default_apply_jobs, execute_actions_parallel};
 use disk_cleaner_engine::report::write_report;
 use disk_cleaner_engine::run::run_phases_parallel;
 use disk_cleaner_engine::trash::{
@@ -11,6 +11,7 @@ use disk_cleaner_engine::trash::{
 use disk_cleaner_engine::util::format_bytes;
 use serde::Serialize;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 
 pub struct AppState {
@@ -152,8 +153,21 @@ pub async fn apply_selected(
     let mut cfg = config;
     cfg.apply = true;
     let use_trash = cfg.gui_use_trash;
+    let jobs = default_apply_jobs();
+    let app2 = app.clone();
     let summary = tauri::async_runtime::spawn_blocking(move || {
-        let (log, summary) = execute_actions(&actions, &cfg, use_trash);
+        // Cap event rate so the webview stays smooth on multi-thousand deletes.
+        let last_emit = Mutex::new(Instant::now() - Duration::from_secs(1));
+        let min_interval = Duration::from_millis(100);
+        let (log, summary) = execute_actions_parallel(&actions, &cfg, use_trash, jobs, |p| {
+            let force = p.done == p.total || p.done == 1;
+            let mut guard = last_emit.lock().unwrap_or_else(|e| e.into_inner());
+            let now = Instant::now();
+            if force || now.duration_since(*guard) >= min_interval {
+                *guard = now;
+                let _ = app2.emit("apply-progress", p);
+            }
+        });
         let _ = write_report(&cfg, &[], &log);
         summary
     })
