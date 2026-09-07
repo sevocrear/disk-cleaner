@@ -7,5 +7,5 @@ Exec=disk-cleaner-app
 Icon=com.diskcleaner.app
 Terminal=false
 Categories=Utility;Filesystem;
-StartupWMClass=com.diskcleaner.app
+StartupWMClass=Disk-cleaner-app
 Keywords=disk;clean;storage;trash;docker;
