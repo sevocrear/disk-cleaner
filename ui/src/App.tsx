@@ -12,6 +12,7 @@ import {
   apiSaveConfig,
   apiStartScan,
   formatBytesLocal,
+  parseSizeLocal,
 } from "./api";
 import type { Action, ApplySummary, Config, DiskInfo, Panel, PhaseResult, TrashItem } from "./types";
 
@@ -39,16 +40,16 @@ const SETTING_TIPS: Record<string, string> = {
     "Only consider files (and media libraries) whose last access and modification are both older than this.",
   "App unused days":
     "Flag Snap, Flatpak, and AppImage apps with no activity under this many days.",
-  "Min file size (bytes)":
-    "Ignore files smaller than this when scanning old files and media. Default 1048576 = 1 MiB.",
-  "Min dupe size (bytes)":
-    "Only hash files at least this large when hunting duplicates. Larger = faster scans.",
+  "Min file size":
+    "Ignore files smaller than this when scanning old files and media. Accepts 1mb, 0.5kb, 5G; stored as bytes. Default 1 MiB.",
+  "Min dupe size":
+    "Only hash files at least this large when hunting duplicates. Accepts 1mb, 0.5kb, 5G. Larger = faster scans.",
   "Dedupe keep":
     "Which copy to keep in each duplicate group: newest, oldest, or first by path.",
   "Journal vacuum":
     "How far back to keep system journal logs when running as root (e.g. 7d, 2weeks).",
-  "Confirm above (bytes)":
-    "CLI asks for confirmation when reclaimable space exceeds this. Default ~5 GiB.",
+  "Confirm above":
+    "CLI asks for confirmation when reclaimable space exceeds this. Accepts 1mb, 0.5kb, 5G. Default ~5 GiB.",
   "Move cleaned files to Trash (safer)":
     "GUI clean moves items to Trash instead of permanent delete. You can restore from the Trash panel.",
   "Include Docker volumes":
@@ -171,11 +172,13 @@ export default function App() {
     setConfig({ ...config, [key]: skip });
   }
 
-  async function saveSettings() {
-    if (!config) return;
+  async function saveSettings(next?: Config) {
+    const c = next ?? config;
+    if (!c) return;
     setBusy(true);
     try {
-      await apiSaveConfig(config);
+      await apiSaveConfig(c);
+      if (next) setConfig(next);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -553,9 +556,52 @@ function SettingsPanel({
 }: {
   config: Config;
   setConfig: (c: Config) => void;
-  onSave: () => void;
+  onSave: (next?: Config) => void;
   busy: boolean;
 }) {
+  const [minFileText, setMinFileText] = useState(() => formatBytesLocal(config.min_file_size));
+  const [minDupeText, setMinDupeText] = useState(() => formatBytesLocal(config.min_dupe_size));
+  const [confirmText, setConfirmText] = useState(() => formatBytesLocal(config.confirm_above));
+  const [sizeError, setSizeError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setMinFileText(formatBytesLocal(config.min_file_size));
+  }, [config.min_file_size]);
+  useEffect(() => {
+    setMinDupeText(formatBytesLocal(config.min_dupe_size));
+  }, [config.min_dupe_size]);
+  useEffect(() => {
+    setConfirmText(formatBytesLocal(config.confirm_above));
+  }, [config.confirm_above]);
+
+  function commitSizes(): Config | null {
+    const minFile = parseSizeLocal(minFileText);
+    const minDupe = parseSizeLocal(minDupeText);
+    const confirm = parseSizeLocal(confirmText);
+    if (minFile === null || minDupe === null || confirm === null) {
+      setSizeError("Invalid size (try 1mb, 0.5kb, 5G)");
+      return null;
+    }
+    setSizeError(null);
+    const next = {
+      ...config,
+      min_file_size: minFile,
+      min_dupe_size: minDupe,
+      confirm_above: confirm,
+    };
+    setMinFileText(formatBytesLocal(minFile));
+    setMinDupeText(formatBytesLocal(minDupe));
+    setConfirmText(formatBytesLocal(confirm));
+    setConfig(next);
+    return next;
+  }
+
+  function handleSave() {
+    const next = commitSizes();
+    if (!next) return;
+    onSave(next);
+  }
+
   return (
     <div className="panel">
       <div className="panel-header">
@@ -581,17 +627,25 @@ function SettingsPanel({
           value={config.app_unused_days}
           onChange={(v) => setConfig({ ...config, app_unused_days: Number(v) })}
         />
-        <Field
-          label="Min file size (bytes)"
-          tip={SETTING_TIPS["Min file size (bytes)"]}
-          value={config.min_file_size}
-          onChange={(v) => setConfig({ ...config, min_file_size: Number(v) })}
+        <SizeField
+          label="Min file size"
+          tip={SETTING_TIPS["Min file size"]}
+          value={minFileText}
+          onChange={(v) => {
+            setMinFileText(v);
+            setSizeError(null);
+          }}
+          onCommit={commitSizes}
         />
-        <Field
-          label="Min dupe size (bytes)"
-          tip={SETTING_TIPS["Min dupe size (bytes)"]}
-          value={config.min_dupe_size}
-          onChange={(v) => setConfig({ ...config, min_dupe_size: Number(v) })}
+        <SizeField
+          label="Min dupe size"
+          tip={SETTING_TIPS["Min dupe size"]}
+          value={minDupeText}
+          onChange={(v) => {
+            setMinDupeText(v);
+            setSizeError(null);
+          }}
+          onCommit={commitSizes}
         />
         <div className="field">
           <TipLabel text="Dedupe keep" tip={SETTING_TIPS["Dedupe keep"]} />
@@ -610,13 +664,20 @@ function SettingsPanel({
           value={config.journal_vacuum}
           onChange={(v) => setConfig({ ...config, journal_vacuum: String(v) })}
         />
-        <Field
-          label="Confirm above (bytes)"
-          tip={SETTING_TIPS["Confirm above (bytes)"]}
-          value={config.confirm_above}
-          onChange={(v) => setConfig({ ...config, confirm_above: Number(v) })}
+        <SizeField
+          label="Confirm above"
+          tip={SETTING_TIPS["Confirm above"]}
+          value={confirmText}
+          onChange={(v) => {
+            setConfirmText(v);
+            setSizeError(null);
+          }}
+          onCommit={commitSizes}
         />
       </div>
+      {sizeError && (
+        <p style={{ color: "#7a4545", margin: "0 0 12px" }}>{sizeError}</p>
+      )}
       <div>
         <CheckOption
           label="Move cleaned files to Trash (safer)"
@@ -644,7 +705,7 @@ function SettingsPanel({
         />
       </div>
       <div>
-        <button className="btn btn-primary" onClick={onSave} disabled={busy}>
+        <button className="btn btn-primary" onClick={handleSave} disabled={busy}>
           {busy ? "Saving…" : "Save settings"}
         </button>
       </div>
@@ -678,6 +739,35 @@ function Field({
     <div className="field">
       <TipLabel text={label} tip={tip} />
       <input value={value} onChange={(e) => onChange(e.target.value)} />
+    </div>
+  );
+}
+
+function SizeField({
+  label,
+  tip,
+  value,
+  onChange,
+  onCommit,
+}: {
+  label: string;
+  tip: string;
+  value: string;
+  onChange: (v: string) => void;
+  onCommit: () => unknown;
+}) {
+  return (
+    <div className="field">
+      <TipLabel text={label} tip={tip} />
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onBlur={() => {
+          onCommit();
+        }}
+        placeholder="1mb"
+        spellCheck={false}
+      />
     </div>
   );
 }
