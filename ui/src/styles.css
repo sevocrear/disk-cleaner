@@ -252,8 +252,25 @@ button {
 }
 
 .btn:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
   cursor: not-allowed;
+  filter: grayscale(0.25);
+  pointer-events: none;
+}
+
+.btn-primary:disabled {
+  background: color-mix(in srgb, var(--accent) 35%, var(--line));
+  color: color-mix(in srgb, white 70%, var(--muted));
+}
+
+.scan-banner {
+  margin: 12px 16px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  color: var(--ink);
+  font-size: 0.85rem;
+  line-height: 1.35;
 }
 
 .btn-primary {

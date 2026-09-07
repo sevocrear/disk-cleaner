@@ -33,6 +33,58 @@ const PHASE_META: Record<string, { title: string; blurb: string; risk: "low" | "
   media: { title: "Media libraries", blurb: "Large unused files in Pictures, Videos, Music, Downloads", risk: "low" },
 };
 
+const COMMAND_KINDS = new Set(["docker_cmd", "cache_cmd", "snap_remove", "flatpak_uninstall"]);
+
+type PhaseStatus = "idle" | "pending" | "running" | "done";
+
+function isCommandAction(a: Action): boolean {
+  return COMMAND_KINDS.has(a.kind) || Boolean(a.command?.length);
+}
+
+/** Default-selected: sized work, plus tiny network prune when listed. */
+function isDefaultSelected(a: Action): boolean {
+  return a.bytes > 0 || a.path === "network_prune";
+}
+
+function formatActionSize(a: Action): string {
+  if (a.path === "network_prune" && a.bytes === 0) return "0B";
+  return formatBytesLocal(a.bytes);
+}
+
+function formatPhaseSize(r: PhaseResult | undefined, status: PhaseStatus): string {
+  if (status === "pending" || status === "running") return "…";
+  if (!r || status === "idle") return "—";
+  const actions = r.actions.filter((a) => a.kind !== "rmdir_if_empty");
+  if (!actions.length) return "—";
+  const known = actions.reduce((s, a) => s + a.bytes, 0);
+  if (known > 0) return formatBytesLocal(known);
+  // Only zero-byte work left (e.g. network prune)
+  return "0B";
+}
+
+function formatSelectionSize(actions: Action[]): string {
+  if (!actions.length) return formatBytesLocal(0);
+  const known = actions.reduce((s, a) => s + a.bytes, 0);
+  return formatBytesLocal(known);
+}
+
+function isOpenablePath(path: string): boolean {
+  return path.startsWith("/") || path.startsWith("~");
+}
+
+function cleanButtonLabel(actions: Action[], useTrash: boolean, busy: boolean): string {
+  if (busy) return "Cleaning…";
+  if (!actions.length) return useTrash ? "Move to Trash" : "Clean";
+  const onlyCommands = actions.every(isCommandAction);
+  if (onlyCommands) return "Run commands";
+  if (useTrash && actions.every((a) => !isCommandAction(a))) return "Move to Trash";
+  return "Clean";
+}
+
+function emptyPhaseStatuses(): Record<string, PhaseStatus> {
+  return Object.fromEntries(Object.keys(PHASE_META).map((k) => [k, "idle" as PhaseStatus]));
+}
+
 const SETTING_TIPS: Record<string, string> = {
   "Docker unused days":
     "Remove Docker images and stopped containers unused longer than this many days.",
@@ -64,9 +116,12 @@ export default function App() {
   const [panel, setPanel] = useState<Panel>("scan");
   const [config, setConfig] = useState<Config | null>(null);
   const [results, setResults] = useState<PhaseResult[]>([]);
+  const [phaseStatus, setPhaseStatus] = useState<Record<string, PhaseStatus>>(emptyPhaseStatuses);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [scanning, setScanning] = useState(false);
   const [scanPhase, setScanPhase] = useState("");
+  const [scanDoneCount, setScanDoneCount] = useState(0);
+  const [scanTotalCount, setScanTotalCount] = useState(0);
   const [disks, setDisks] = useState<DiskInfo[]>([]);
   const [trash, setTrash] = useState<TrashItem[]>([]);
   const [report, setReport] = useState<ApplySummary | null>(null);
@@ -78,16 +133,45 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
+    const unsubs: Array<() => void> = [];
+    listen<{ phase: string }>("scan-phase-start", (e) => {
+      const phase = e.payload.phase;
+      setScanPhase(phase);
+      setPhaseStatus((prev) => ({ ...prev, [phase]: "running" }));
+    })
+      .then((fn) => unsubs.push(fn))
+      .catch(() => undefined);
+
+    listen<{ result: PhaseResult }>("scan-phase-done", (e) => {
+      const result = e.payload.result;
+      setResults((prev) => {
+        const others = prev.filter((r) => r.name !== result.name);
+        return [...others, result].sort(
+          (a, b) =>
+            Object.keys(PHASE_META).indexOf(a.name) - Object.keys(PHASE_META).indexOf(b.name),
+        );
+      });
+      setPhaseStatus((prev) => ({ ...prev, [result.name]: "done" }));
+      setScanDoneCount((n) => n + 1);
+      setSelected((prev) => {
+        const next = new Set(prev);
+        for (const a of result.actions) {
+          if (a.kind !== "rmdir_if_empty" && isDefaultSelected(a)) next.add(a.id);
+        }
+        return next;
+      });
+    })
+      .then((fn) => unsubs.push(fn))
+      .catch(() => undefined);
+
     listen<{ phase: string }>("scan-progress", (e) => {
       setScanPhase(e.payload.phase);
     })
-      .then((fn) => {
-        unlisten = fn;
-      })
+      .then((fn) => unsubs.push(fn))
       .catch(() => undefined);
+
     return () => {
-      unlisten?.();
+      unsubs.forEach((u) => u());
     };
   }, []);
 
@@ -114,23 +198,47 @@ export default function App() {
     [allActions, selected],
   );
 
-  const selectedBytes = selectedActions.reduce((s, a) => s + a.bytes, 0);
+  const selectedSizeLabel = formatSelectionSize(selectedActions);
+
+  const enabledPhaseCount = useMemo(() => {
+    if (!config) return 0;
+    return Object.keys(PHASE_META).filter((name) => {
+      const key = `skip_${name}` as keyof Config;
+      return !config[key];
+    }).length;
+  }, [config]);
 
   async function runScan() {
     if (!config) return;
     setScanning(true);
     setError(null);
     setScanPhase("starting");
+    setResults([]);
+    setSelected(new Set());
+    setScanDoneCount(0);
+    setScanTotalCount(enabledPhaseCount);
+    const pending: Record<string, PhaseStatus> = emptyPhaseStatuses();
+    for (const name of Object.keys(PHASE_META)) {
+      const key = `skip_${name}` as keyof Config;
+      pending[name] = config[key] ? "idle" : "pending";
+    }
+    setPhaseStatus(pending);
     try {
       const done = await apiStartScan(config);
       setResults(done.results);
       const ids = new Set(
         done.results.flatMap((r) =>
-          r.actions.filter((a) => a.kind !== "rmdir_if_empty").map((a) => a.id),
+          r.actions
+            .filter((a) => a.kind !== "rmdir_if_empty" && isDefaultSelected(a))
+            .map((a) => a.id),
         ),
       );
       setSelected(ids);
-      setPanel("scan");
+      setPhaseStatus((prev) => {
+        const next = { ...prev };
+        for (const r of done.results) next[r.name] = "done";
+        return next;
+      });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -209,6 +317,12 @@ export default function App() {
             {n.label}
           </button>
         ))}
+        {scanning && (
+          <div className="scan-banner" aria-live="polite">
+            Scanning {scanDoneCount}/{scanTotalCount || "…"}
+            {scanPhase ? ` · ${scanPhase}` : ""}
+          </div>
+        )}
       </aside>
 
       <main className="main">
@@ -219,6 +333,7 @@ export default function App() {
         {panel === "scan" && (
           <ScanPanel
             results={results}
+            phaseStatus={phaseStatus}
             config={config}
             scanning={scanning}
             scanPhase={scanPhase}
@@ -263,13 +378,17 @@ export default function App() {
         {(panel === "scan" || panel === "review") && (
           <div className="footer-bar">
             <div>
-              <div className="meta">{selectedActions.length} selected</div>
+              <div className="meta">
+                {scanning
+                  ? `Scanning ${scanDoneCount}/${scanTotalCount || "…"}`
+                  : `${selectedActions.length} selected`}
+              </div>
               <div className="display-num" style={{ fontSize: "1.6rem" }}>
-                {formatBytesLocal(selectedBytes)}
+                {scanning ? "…" : selectedSizeLabel}
               </div>
             </div>
             <div style={{ display: "flex", gap: 10 }}>
-              <button className="btn btn-ghost" onClick={() => setPanel("review")} disabled={!allActions.length}>
+              <button className="btn btn-ghost" onClick={() => setPanel("review")} disabled={!allActions.length && !scanning}>
                 Review
               </button>
               <button
@@ -277,7 +396,9 @@ export default function App() {
                 disabled={!selectedActions.length || busy || scanning}
                 onClick={cleanSelected}
               >
-                {busy ? "Cleaning…" : config.gui_use_trash ? "Move to Trash" : "Clean"}
+                {scanning
+                  ? "Scanning…"
+                  : cleanButtonLabel(selectedActions, config.gui_use_trash, busy)}
               </button>
             </div>
           </div>
@@ -322,6 +443,7 @@ export default function App() {
 
 function ScanPanel({
   results,
+  phaseStatus,
   config,
   scanning,
   scanPhase,
@@ -329,6 +451,7 @@ function ScanPanel({
   onTogglePhase,
 }: {
   results: PhaseResult[];
+  phaseStatus: Record<string, PhaseStatus>;
   config: Config;
   scanning: boolean;
   scanPhase: string;
@@ -337,8 +460,21 @@ function ScanPanel({
   onOpenReview: () => void;
 }) {
   const byName = Object.fromEntries(results.map((r) => [r.name, r]));
-  const total = results.reduce((s, r) => s + r.reclaimable_bytes, 0);
   const phases = Object.keys(PHASE_META);
+  const anyDone = phases.some((n) => phaseStatus[n] === "done");
+  const knownTotal = results.reduce(
+    (s, r) => s + r.actions.filter((a) => a.kind !== "rmdir_if_empty").reduce((x, a) => x + a.bytes, 0),
+    0,
+  );
+  const totalLabel = scanning
+    ? "…"
+    : anyDone || results.length
+      ? knownTotal > 0
+        ? formatBytesLocal(knownTotal)
+        : results.some((r) => r.actions.some((a) => a.kind !== "rmdir_if_empty"))
+          ? "0B"
+          : "—"
+      : "—";
 
   return (
     <div className="panel">
@@ -349,7 +485,7 @@ function ScanPanel({
         </div>
         <div style={{ textAlign: "right" }}>
           <div className="meta">Can reclaim</div>
-          <div className="display-num">{formatBytesLocal(total)}</div>
+          <div className="display-num">{totalLabel}</div>
         </div>
       </div>
 
@@ -358,7 +494,9 @@ function ScanPanel({
           <div className="progress">
             <span />
           </div>
-          <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>Scanning {scanPhase || "…"}</p>
+          <p style={{ color: "var(--muted)", fontSize: "0.9rem" }}>
+            Scanning {scanPhase || "…"} (categories run in parallel)
+          </p>
         </div>
       )}
 
@@ -368,11 +506,13 @@ function ScanPanel({
           const skipKey = `skip_${name}` as keyof Config;
           const skipped = Boolean(config[skipKey]);
           const r = byName[name];
+          const status = skipped ? "idle" : phaseStatus[name] || "idle";
           return (
             <div className="cat-row" key={name}>
               <input
                 type="checkbox"
                 checked={!skipped}
+                disabled={scanning}
                 onChange={(e) => onTogglePhase(name, !e.target.checked)}
               />
               <div>
@@ -380,7 +520,7 @@ function ScanPanel({
                 <div className="meta">{meta.blurb}</div>
               </div>
               <span className={`chip ${meta.risk}`}>{meta.risk === "low" ? "Low risk" : "Review"}</span>
-              <strong>{r ? formatBytesLocal(r.reclaimable_bytes) : "—"}</strong>
+              <strong>{skipped ? "—" : formatPhaseSize(r, status)}</strong>
             </div>
           );
         })}
@@ -388,7 +528,7 @@ function ScanPanel({
 
       <div>
         <button className="btn btn-primary" onClick={onScan} disabled={scanning}>
-          {scanning ? "Scanning…" : results.length ? "Scan again" : "Scan"}
+          {scanning ? "Scanning…" : results.length || anyDone ? "Scan again" : "Scan"}
         </button>
       </div>
     </div>
@@ -420,9 +560,15 @@ function ReviewPanel({
     <div className="panel">
       <div className="panel-header">
         <h2>Review</h2>
-        <p>Check paths and sizes. Uncheck anything you want to keep.</p>
+        <p>Check paths and sizes. Empty command actions are omitted from the scan.</p>
       </div>
       <div style={{ display: "flex", gap: 8 }}>
+        <button
+          className="btn btn-ghost"
+          onClick={() => setSelected(new Set(actions.filter(isDefaultSelected).map((a) => a.id)))}
+        >
+          Select sized
+        </button>
         <button
           className="btn btn-ghost"
           onClick={() => setSelected(new Set(actions.map((a) => a.id)))}
@@ -450,12 +596,19 @@ function ReviewPanel({
               <div className="path">{a.path}</div>
               <div className="meta">
                 {a.phase} · {a.detail}
+                {isCommandAction(a) ? " · command" : ""}
               </div>
             </div>
-            <button className="btn btn-ghost" onClick={() => apiOpenPath(a.path)}>
-              Open
-            </button>
-            <strong>{formatBytesLocal(a.bytes)}</strong>
+            {isOpenablePath(a.path) ? (
+              <button className="btn btn-ghost" onClick={() => apiOpenPath(a.path)}>
+                Open
+              </button>
+            ) : (
+              <span className="meta" style={{ minWidth: 52, textAlign: "center" }}>
+                —
+              </span>
+            )}
+            <strong>{formatActionSize(a)}</strong>
           </div>
         ))}
       </div>

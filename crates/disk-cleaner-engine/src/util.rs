@@ -64,6 +64,30 @@ pub fn docker_until_filter(days: u32) -> String {
     format!("until={hours}h")
 }
 
+/// Parse a Docker reclaimable field like `1.234GB (50%)` or `0B`.
+pub fn parse_docker_reclaimable_field(field: &str) -> Option<u64> {
+    let token = field.trim().split_whitespace().next()?;
+    parse_size(token).ok()
+}
+
+/// Parse `docker system df --format '{{.Type}}\t{{.Reclaimable}}'` into type → bytes.
+pub fn parse_docker_system_df(stdout: &str) -> std::collections::HashMap<String, u64> {
+    let mut map = std::collections::HashMap::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((ty, reclaim)) = line.split_once('\t') else {
+            continue;
+        };
+        if let Some(bytes) = parse_docker_reclaimable_field(reclaim) {
+            map.insert(ty.trim().to_string(), bytes);
+        }
+    }
+    map
+}
+
 pub fn iter_files(root: &Path, cross_fs: bool) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if !root.exists() {
@@ -254,5 +278,29 @@ mod tests {
 
         let n = parse_size("3.4Gb").unwrap();
         assert_eq!(parse_size(&format_bytes(n)).unwrap(), n);
+    }
+
+    #[test]
+    fn docker_reclaimable_and_system_df() {
+        assert_eq!(parse_docker_reclaimable_field("0B").unwrap(), 0);
+        assert_eq!(
+            parse_docker_reclaimable_field("1.5GB (45%)").unwrap(),
+            parse_size("1.5G").unwrap()
+        );
+        assert_eq!(
+            parse_docker_reclaimable_field("512MB (10%)").unwrap(),
+            parse_size("512M").unwrap()
+        );
+
+        let df = parse_docker_system_df(
+            "Containers\t0B (0%)\nImages\t1.0GB (50%)\nLocal Volumes\t2.5GB (100%)\nBuild Cache\t0B (0%)\n",
+        );
+        assert_eq!(df.get("Containers").copied(), Some(0));
+        assert_eq!(df.get("Images").copied(), Some(parse_size("1G").unwrap()));
+        assert_eq!(
+            df.get("Local Volumes").copied(),
+            Some(parse_size("2.5G").unwrap())
+        );
+        assert_eq!(df.get("Build Cache").copied(), Some(0));
     }
 }
