@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   apiApplySelected,
@@ -27,15 +27,37 @@ const NAV: { id: Panel; label: string }[] = [
 const PHASE_META: Record<string, { title: string; blurb: string; risk: "low" | "med" }> = {
   docker: { title: "Docker", blurb: "Stopped containers, unused images, build cache", risk: "med" },
   caches: { title: "Caches", blurb: "Old user cache entries and aged trash files", risk: "low" },
-  files: { title: "Old files", blurb: "Large unused files in safe allowlisted roots", risk: "low" },
+  files: {
+    title: "Old files",
+    blurb: "Large unused files in caches, temp, trash, and selected disks",
+    risk: "low",
+  },
   apps: { title: "Unused apps", blurb: "Snap, Flatpak, and AppImage candidates", risk: "med" },
-  dupes: { title: "Duplicates", blurb: "Identical content under Downloads and temp roots", risk: "low" },
-  media: { title: "Media libraries", blurb: "Large unused files in Pictures, Videos, Music, Downloads", risk: "low" },
+  dupes: {
+    title: "Duplicates",
+    blurb: "Identical content under Downloads, temp, and selected disks",
+    risk: "low",
+  },
+  media: {
+    title: "Media libraries",
+    blurb: "Large unused files only in Pictures, Videos, Music, Downloads",
+    risk: "low",
+  },
 };
+
+/** Above this, Review stays virtualized and we skip auto-selecting every item. */
+const AUTO_SELECT_LIMIT = 2_000;
+const REVIEW_ROW_HEIGHT = 72;
+const REVIEW_OVERSCAN = 10;
 
 const COMMAND_KINDS = new Set(["docker_cmd", "cache_cmd", "snap_remove", "flatpak_uninstall"]);
 
 type PhaseStatus = "idle" | "pending" | "running" | "done";
+
+type PhaseSummary = {
+  reclaimable_bytes: number;
+  action_count: number;
+};
 
 function isCommandAction(a: Action): boolean {
   return COMMAND_KINDS.has(a.kind) || Boolean(a.command?.length);
@@ -51,15 +73,26 @@ function formatActionSize(a: Action): string {
   return formatBytesLocal(a.bytes);
 }
 
-function formatPhaseSize(r: PhaseResult | undefined, status: PhaseStatus): string {
+function formatPhaseSize(
+  r: PhaseResult | undefined,
+  summary: PhaseSummary | undefined,
+  status: PhaseStatus,
+): string {
   if (status === "pending" || status === "running") return "…";
-  if (!r || status === "idle") return "—";
-  const actions = r.actions.filter((a) => a.kind !== "rmdir_if_empty");
-  if (!actions.length) return "—";
-  const known = actions.reduce((s, a) => s + a.bytes, 0);
-  if (known > 0) return formatBytesLocal(known);
-  // Only zero-byte work left (e.g. network prune)
-  return "0B";
+  if (status === "idle") return "—";
+  if (r) {
+    const actions = r.actions.filter((a) => a.kind !== "rmdir_if_empty");
+    if (!actions.length) return "—";
+    const known = actions.reduce((s, a) => s + a.bytes, 0);
+    if (known > 0) return formatBytesLocal(known);
+    return "0B";
+  }
+  if (summary) {
+    if (summary.action_count === 0) return "—";
+    if (summary.reclaimable_bytes > 0) return formatBytesLocal(summary.reclaimable_bytes);
+    return "0B";
+  }
+  return "—";
 }
 
 function formatSelectionSize(actions: Action[]): string {
@@ -83,6 +116,17 @@ function cleanButtonLabel(actions: Action[], useTrash: boolean, busy: boolean): 
 
 function emptyPhaseStatuses(): Record<string, PhaseStatus> {
   return Object.fromEntries(Object.keys(PHASE_META).map((k) => [k, "idle" as PhaseStatus]));
+}
+
+function phaseSkipped(config: Config, name: string): boolean {
+  const key = `skip_${name}` as keyof Config;
+  return Boolean(config[key]);
+}
+
+function defaultSelectedIds(actions: Action[]): Set<string> {
+  const pick = actions.filter((a) => a.kind !== "rmdir_if_empty" && isDefaultSelected(a));
+  if (pick.length > AUTO_SELECT_LIMIT) return new Set();
+  return new Set(pick.map((a) => a.id));
 }
 
 const SETTING_TIPS: Record<string, string> = {
@@ -114,6 +158,7 @@ export default function App() {
   const [panel, setPanel] = useState<Panel>("scan");
   const [config, setConfig] = useState<Config | null>(null);
   const [results, setResults] = useState<PhaseResult[]>([]);
+  const [phaseSummaries, setPhaseSummaries] = useState<Record<string, PhaseSummary>>({});
   const [phaseStatus, setPhaseStatus] = useState<Record<string, PhaseStatus>>(emptyPhaseStatuses);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [scanning, setScanning] = useState(false);
@@ -140,24 +185,19 @@ export default function App() {
       .then((fn) => unsubs.push(fn))
       .catch(() => undefined);
 
-    listen<{ result: PhaseResult }>("scan-phase-done", (e) => {
-      const result = e.payload.result;
-      setResults((prev) => {
-        const others = prev.filter((r) => r.name !== result.name);
-        return [...others, result].sort(
-          (a, b) =>
-            Object.keys(PHASE_META).indexOf(a.name) - Object.keys(PHASE_META).indexOf(b.name),
-        );
-      });
-      setPhaseStatus((prev) => ({ ...prev, [result.name]: "done" }));
+    listen<{
+      name: string;
+      reclaimable_bytes: number;
+      action_count: number;
+      notes: string[];
+    }>("scan-phase-done", (e) => {
+      const { name, reclaimable_bytes, action_count } = e.payload;
+      setPhaseSummaries((prev) => ({
+        ...prev,
+        [name]: { reclaimable_bytes, action_count },
+      }));
+      setPhaseStatus((prev) => ({ ...prev, [name]: "done" }));
       setScanDoneCount((n) => n + 1);
-      setSelected((prev) => {
-        const next = new Set(prev);
-        for (const a of result.actions) {
-          if (a.kind !== "rmdir_if_empty" && isDefaultSelected(a)) next.add(a.id);
-        }
-        return next;
-      });
     })
       .then((fn) => unsubs.push(fn))
       .catch(() => undefined);
@@ -186,9 +226,19 @@ export default function App() {
     if (panel === "trash") refreshTrash();
   }, [panel, refreshDisks, refreshTrash]);
 
+  const enabledPhases = useMemo(() => {
+    if (!config) return new Set<string>();
+    return new Set(Object.keys(PHASE_META).filter((name) => !phaseSkipped(config, name)));
+  }, [config]);
+
+  const visibleResults = useMemo(
+    () => results.filter((r) => enabledPhases.has(r.name)),
+    [results, enabledPhases],
+  );
+
   const allActions = useMemo(
-    () => results.flatMap((r) => r.actions.filter((a) => a.kind !== "rmdir_if_empty")),
-    [results],
+    () => visibleResults.flatMap((r) => r.actions.filter((a) => a.kind !== "rmdir_if_empty")),
+    [visibleResults],
   );
 
   const selectedActions = useMemo(
@@ -198,13 +248,22 @@ export default function App() {
 
   const selectedSizeLabel = formatSelectionSize(selectedActions);
 
-  const enabledPhaseCount = useMemo(() => {
-    if (!config) return 0;
-    return Object.keys(PHASE_META).filter((name) => {
-      const key = `skip_${name}` as keyof Config;
-      return !config[key];
-    }).length;
-  }, [config]);
+  const enabledPhaseCount = useMemo(() => enabledPhases.size, [enabledPhases]);
+
+  // Drop selection for unchecked categories so footer/Review match the checkboxes.
+  useEffect(() => {
+    if (!config) return;
+    const allowed = new Set(allActions.map((a) => a.id));
+    setSelected((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (allowed.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [config, allActions]);
 
   async function runScan() {
     if (!config) return;
@@ -212,30 +271,36 @@ export default function App() {
     setError(null);
     setScanPhase("starting");
     setResults([]);
+    setPhaseSummaries({});
     setSelected(new Set());
     setScanDoneCount(0);
     setScanTotalCount(enabledPhaseCount);
     const pending: Record<string, PhaseStatus> = emptyPhaseStatuses();
     for (const name of Object.keys(PHASE_META)) {
-      const key = `skip_${name}` as keyof Config;
-      pending[name] = config[key] ? "idle" : "pending";
+      pending[name] = phaseSkipped(config, name) ? "idle" : "pending";
     }
     setPhaseStatus(pending);
     try {
       const done = await apiStartScan(config);
-      setResults(done.results);
-      const ids = new Set(
-        done.results.flatMap((r) =>
-          r.actions
-            .filter((a) => a.kind !== "rmdir_if_empty" && isDefaultSelected(a))
-            .map((a) => a.id),
-        ),
-      );
-      setSelected(ids);
-      setPhaseStatus((prev) => {
-        const next = { ...prev };
-        for (const r of done.results) next[r.name] = "done";
-        return next;
+      startTransition(() => {
+        setResults(done.results);
+        const enabled = done.results.filter((r) => !phaseSkipped(config, r.name));
+        setSelected(defaultSelectedIds(enabled.flatMap((r) => r.actions)));
+        setPhaseStatus((prev) => {
+          const next = { ...prev };
+          for (const r of done.results) next[r.name] = "done";
+          return next;
+        });
+        setPhaseSummaries((prev) => {
+          const next = { ...prev };
+          for (const r of done.results) {
+            next[r.name] = {
+              reclaimable_bytes: r.reclaimable_bytes,
+              action_count: r.actions.filter((a) => a.kind !== "rmdir_if_empty").length,
+            };
+          }
+          return next;
+        });
       });
     } catch (e) {
       setError(String(e));
@@ -253,16 +318,18 @@ export default function App() {
       const { summary } = await apiApplySelected(config, selectedActions);
       setReport(summary);
       const removed = new Set(selectedActions.map((a) => a.id));
-      setResults((prev) =>
-        prev.map((r) => ({
-          ...r,
-          actions: r.actions.filter((a) => !removed.has(a.id)),
-          reclaimable_bytes: r.actions
-            .filter((a) => !removed.has(a.id))
-            .reduce((s, a) => s + a.bytes, 0),
-        })),
-      );
-      setSelected(new Set());
+      startTransition(() => {
+        setResults((prev) =>
+          prev.map((r) => ({
+            ...r,
+            actions: r.actions.filter((a) => !removed.has(a.id)),
+            reclaimable_bytes: r.actions
+              .filter((a) => !removed.has(a.id))
+              .reduce((s, a) => s + a.bytes, 0),
+          })),
+        );
+        setSelected(new Set());
+      });
       refreshDisks();
       refreshTrash();
     } catch (e) {
@@ -331,6 +398,7 @@ export default function App() {
         {panel === "scan" && (
           <ScanPanel
             results={results}
+            phaseSummaries={phaseSummaries}
             phaseStatus={phaseStatus}
             config={config}
             scanning={scanning}
@@ -346,10 +414,28 @@ export default function App() {
             actions={allActions}
             selected={selected}
             setSelected={setSelected}
+            autoSelectSkipped={allActions.filter(isDefaultSelected).length > AUTO_SELECT_LIMIT}
           />
         )}
 
-        {panel === "disks" && <DisksPanel disks={disks} onRefresh={refreshDisks} />}
+        {panel === "disks" && (
+          <DisksPanel
+            disks={disks}
+            scanMounts={config.scan_mounts ?? ["/"]}
+            onRefresh={refreshDisks}
+            onToggleMount={(mount, on) => {
+              const cur = [...(config.scan_mounts ?? ["/"])];
+              const next = on
+                ? cur.includes(mount)
+                  ? cur
+                  : [...cur, mount]
+                : cur.filter((m) => m !== mount);
+              const nextCfg = { ...config, scan_mounts: next };
+              setConfig(nextCfg);
+              apiSaveConfig(nextCfg).catch((e) => setError(String(e)));
+            }}
+          />
+        )}
 
         {panel === "trash" && (
           <TrashPanel
@@ -441,14 +527,17 @@ export default function App() {
 
 function ScanPanel({
   results,
+  phaseSummaries,
   phaseStatus,
   config,
   scanning,
   scanPhase,
   onScan,
   onTogglePhase,
+  onOpenReview,
 }: {
   results: PhaseResult[];
+  phaseSummaries: Record<string, PhaseSummary>;
   phaseStatus: Record<string, PhaseStatus>;
   config: Config;
   scanning: boolean;
@@ -460,16 +549,26 @@ function ScanPanel({
   const byName = Object.fromEntries(results.map((r) => [r.name, r]));
   const phases = Object.keys(PHASE_META);
   const anyDone = phases.some((n) => phaseStatus[n] === "done");
-  const knownTotal = results.reduce(
-    (s, r) => s + r.actions.filter((a) => a.kind !== "rmdir_if_empty").reduce((x, a) => x + a.bytes, 0),
-    0,
-  );
+  const enabled = phases.filter((n) => !phaseSkipped(config, n));
+  const knownTotal = enabled.reduce((s, name) => {
+    const r = byName[name];
+    if (r) {
+      return (
+        s + r.actions.filter((a) => a.kind !== "rmdir_if_empty").reduce((x, a) => x + a.bytes, 0)
+      );
+    }
+    return s + (phaseSummaries[name]?.reclaimable_bytes || 0);
+  }, 0);
   const totalLabel = scanning
     ? "…"
     : anyDone || results.length
       ? knownTotal > 0
         ? formatBytesLocal(knownTotal)
-        : results.some((r) => r.actions.some((a) => a.kind !== "rmdir_if_empty"))
+        : enabled.some((name) => {
+            const r = byName[name];
+            if (r) return r.actions.some((a) => a.kind !== "rmdir_if_empty");
+            return (phaseSummaries[name]?.action_count || 0) > 0;
+          })
           ? "0B"
           : "—"
       : "—";
@@ -501,8 +600,7 @@ function ScanPanel({
       <div className="row-list">
         {phases.map((name) => {
           const meta = PHASE_META[name];
-          const skipKey = `skip_${name}` as keyof Config;
-          const skipped = Boolean(config[skipKey]);
+          const skipped = phaseSkipped(config, name);
           const r = byName[name];
           const status = skipped ? "idle" : phaseStatus[name] || "idle";
           return (
@@ -518,7 +616,7 @@ function ScanPanel({
                 <div className="meta">{meta.blurb}</div>
               </div>
               <span className={`chip ${meta.risk}`}>{meta.risk === "low" ? "Low risk" : "Review"}</span>
-              <strong>{skipped ? "—" : formatPhaseSize(r, status)}</strong>
+              <strong>{skipped ? "—" : formatPhaseSize(r, phaseSummaries[name], status)}</strong>
             </div>
           );
         })}
@@ -528,6 +626,11 @@ function ScanPanel({
         <button className="btn btn-primary" onClick={onScan} disabled={scanning}>
           {scanning ? "Scanning…" : results.length || anyDone ? "Scan again" : "Scan"}
         </button>
+        {(results.length > 0 || anyDone) && !scanning && (
+          <button className="btn btn-ghost" style={{ marginLeft: 8 }} onClick={onOpenReview}>
+            Review
+          </button>
+        )}
       </div>
     </div>
   );
@@ -537,90 +640,161 @@ function ReviewPanel({
   actions,
   selected,
   setSelected,
+  autoSelectSkipped,
 }: {
   actions: Action[];
   selected: Set<string>;
   setSelected: (s: Set<string>) => void;
+  autoSelectSkipped: boolean;
 }) {
   if (!actions.length) {
     return (
       <div className="panel">
         <div className="panel-header">
           <h2>Review</h2>
-          <p>Run a scan to see reclaimable items here.</p>
+          <p>Only checked categories from Deep clean appear here.</p>
         </div>
-        <div className="empty">Nothing to review yet</div>
+        <div className="empty">Nothing to review yet — enable a category and scan.</div>
       </div>
     );
   }
 
+  function selectSized() {
+    startTransition(() => {
+      setSelected(new Set(actions.filter(isDefaultSelected).map((a) => a.id)));
+    });
+  }
+
+  function selectAll() {
+    startTransition(() => {
+      setSelected(new Set(actions.map((a) => a.id)));
+    });
+  }
+
   return (
-    <div className="panel">
+    <div className="panel review-panel">
       <div className="panel-header">
         <h2>Review</h2>
-        <p>Check paths and sizes. Empty command actions are omitted from the scan.</p>
+        <p>
+          Showing {actions.length.toLocaleString()} items from checked categories only.
+          {autoSelectSkipped && selected.size === 0
+            ? " Large result — nothing pre-selected; use Select sized / Select all."
+            : ""}
+        </p>
       </div>
-      <div style={{ display: "flex", gap: 8 }}>
-        <button
-          className="btn btn-ghost"
-          onClick={() => setSelected(new Set(actions.filter(isDefaultSelected).map((a) => a.id)))}
-        >
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button className="btn btn-ghost" onClick={selectSized}>
           Select sized
         </button>
-        <button
-          className="btn btn-ghost"
-          onClick={() => setSelected(new Set(actions.map((a) => a.id)))}
-        >
+        <button className="btn btn-ghost" onClick={selectAll}>
           Select all
         </button>
         <button className="btn btn-ghost" onClick={() => setSelected(new Set())}>
           Clear
         </button>
       </div>
-      <div className="row-list">
-        {actions.map((a) => (
-          <div className="file-row" key={a.id}>
-            <input
-              type="checkbox"
-              checked={selected.has(a.id)}
-              onChange={(e) => {
-                const next = new Set(selected);
-                if (e.target.checked) next.add(a.id);
-                else next.delete(a.id);
-                setSelected(next);
-              }}
-            />
-            <div>
-              <div className="path">{a.path}</div>
-              <div className="meta">
-                {a.phase} · {a.detail}
-                {isCommandAction(a) ? " · command" : ""}
+      <VirtualActionList actions={actions} selected={selected} setSelected={setSelected} />
+    </div>
+  );
+}
+
+function VirtualActionList({
+  actions,
+  selected,
+  setSelected,
+}: {
+  actions: Action[];
+  selected: Set<string>;
+  setSelected: (s: Set<string>) => void;
+}) {
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportH, setViewportH] = useState(480);
+
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    const sync = () => setViewportH(el.clientHeight || 480);
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const totalH = actions.length * REVIEW_ROW_HEIGHT;
+  const start = Math.max(0, Math.floor(scrollTop / REVIEW_ROW_HEIGHT) - REVIEW_OVERSCAN);
+  const visibleCount = Math.ceil(viewportH / REVIEW_ROW_HEIGHT) + REVIEW_OVERSCAN * 2;
+  const end = Math.min(actions.length, start + visibleCount);
+  const slice = actions.slice(start, end);
+
+  return (
+    <div
+      className="virtual-list"
+      ref={scrollerRef}
+      onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+    >
+      <div className="virtual-list-spacer" style={{ height: totalH }}>
+        <div
+          className="virtual-list-window"
+          style={{ transform: `translateY(${start * REVIEW_ROW_HEIGHT}px)` }}
+        >
+          {slice.map((a) => (
+            <div className="file-row" key={a.id} style={{ height: REVIEW_ROW_HEIGHT }}>
+              <input
+                type="checkbox"
+                checked={selected.has(a.id)}
+                onChange={(e) => {
+                  const next = new Set(selected);
+                  if (e.target.checked) next.add(a.id);
+                  else next.delete(a.id);
+                  setSelected(next);
+                }}
+              />
+              <div className="file-row-text">
+                <div className="path" title={a.path}>
+                  {a.path}
+                </div>
+                <div className="meta">
+                  {a.phase} · {a.detail}
+                  {isCommandAction(a) ? " · command" : ""}
+                </div>
               </div>
+              {isOpenablePath(a.path) ? (
+                <button className="btn btn-ghost" onClick={() => apiOpenPath(a.path)}>
+                  Open
+                </button>
+              ) : (
+                <span className="meta" style={{ minWidth: 52, textAlign: "center" }}>
+                  —
+                </span>
+              )}
+              <strong>{formatActionSize(a)}</strong>
             </div>
-            {isOpenablePath(a.path) ? (
-              <button className="btn btn-ghost" onClick={() => apiOpenPath(a.path)}>
-                Open
-              </button>
-            ) : (
-              <span className="meta" style={{ minWidth: 52, textAlign: "center" }}>
-                —
-              </span>
-            )}
-            <strong>{formatActionSize(a)}</strong>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     </div>
   );
 }
 
-function DisksPanel({ disks, onRefresh }: { disks: DiskInfo[]; onRefresh: () => void }) {
+function DisksPanel({
+  disks,
+  scanMounts,
+  onRefresh,
+  onToggleMount,
+}: {
+  disks: DiskInfo[];
+  scanMounts: string[];
+  onRefresh: () => void;
+  onToggleMount: (mount: string, on: boolean) => void;
+}) {
+  const selected = new Set(scanMounts);
   return (
     <div className="panel">
       <div className="panel-header" style={{ display: "flex", justifyContent: "space-between" }}>
         <div>
           <h2>Disks</h2>
-          <p>Free space across mounted volumes.</p>
+          <p>Choose which mounted volumes Deep clean should scan. `/` is on by default.</p>
         </div>
         <button className="btn btn-ghost" onClick={onRefresh}>
           Refresh
@@ -629,19 +803,33 @@ function DisksPanel({ disks, onRefresh }: { disks: DiskInfo[]; onRefresh: () => 
       <div className="row-list">
         {disks.map((d) => {
           const pct = d.total_bytes ? (d.used_bytes / d.total_bytes) * 100 : 0;
+          const checked = selected.has(d.mount_point);
           return (
-            <div className="disk-row" key={d.mount_point}>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <strong>{d.mount_point}</strong>
-                <span className="meta">{d.file_system}</span>
+            <label className="disk-row" key={d.mount_point}>
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={(e) => onToggleMount(d.mount_point, e.target.checked)}
+              />
+              <div className="disk-row-body">
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                  <div>
+                    <strong>{d.mount_point}</strong>
+                    {d.name && d.name !== d.mount_point && (
+                      <div className="meta disk-device">{d.name}</div>
+                    )}
+                  </div>
+                  <span className="meta">{d.file_system}</span>
+                </div>
+                <div className="bar">
+                  <span style={{ width: `${pct}%` }} />
+                </div>
+                <div className="meta">
+                  {formatBytesLocal(d.available_bytes)} free of {formatBytesLocal(d.total_bytes)}
+                  {checked ? " · included in scan" : ""}
+                </div>
               </div>
-              <div className="bar">
-                <span style={{ width: `${pct}%` }} />
-              </div>
-              <div className="meta">
-                {formatBytesLocal(d.available_bytes)} free of {formatBytesLocal(d.total_bytes)}
-              </div>
-            </div>
+            </label>
           );
         })}
         {!disks.length && <div className="empty">No disks found</div>}

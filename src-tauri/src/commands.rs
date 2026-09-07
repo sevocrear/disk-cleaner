@@ -32,7 +32,10 @@ pub struct ScanProgress {
 
 #[derive(Clone, Serialize)]
 pub struct ScanPhaseDone {
-    pub result: PhaseResult,
+    pub name: String,
+    pub reclaimable_bytes: u64,
+    pub action_count: usize,
+    pub notes: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -109,7 +112,19 @@ pub async fn start_scan(
                 );
             },
             |result| {
-                let _ = app2.emit("scan-phase-done", ScanPhaseDone { result });
+                let _ = app2.emit(
+                    "scan-phase-done",
+                    ScanPhaseDone {
+                        name: result.name.clone(),
+                        reclaimable_bytes: result.reclaimable_bytes,
+                        action_count: result
+                            .actions
+                            .iter()
+                            .filter(|a| a.kind != "rmdir_if_empty")
+                            .count(),
+                        notes: result.notes.clone(),
+                    },
+                );
             },
         )
     })

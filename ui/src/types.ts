@@ -25,6 +25,8 @@ export type Config = {
   min_dupe_size: number;
   dedupe_keep: string;
   extra_roots: string[];
+  /** Mount points to include in Deep clean scans. Default: ["/"]. */
+  scan_mounts: string[];
   dedupe_roots: string[];
   protect_globs: string[];
   protect_apps: string[];
