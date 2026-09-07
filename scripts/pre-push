@@ -7,6 +7,13 @@ ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 source "$HOME/.cargo/env" 2>/dev/null || true
 
+echo "==> ui build (Tauri needs ui/dist)"
+(
+  cd ui
+  npm ci --prefer-offline --no-audit --no-fund
+  npm run build
+)
+
 echo "==> cargo test -p disk-cleaner-engine"
 cargo test -p disk-cleaner-engine --all-targets
 
@@ -15,12 +22,5 @@ if [[ -d "$ROOT/.deps/prefix" ]]; then
   export PKG_CONFIG_PATH="$ROOT/.deps/prefix/usr/lib/x86_64-linux-gnu/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 fi
 cargo check --workspace --all-targets
-
-echo "==> ui build"
-(
-  cd ui
-  npm ci --prefer-offline --no-audit --no-fund
-  npm run build
-)
 
 echo "pre-push checks OK"
