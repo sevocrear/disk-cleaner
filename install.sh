@@ -3,7 +3,7 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/sevocrear/disk-cleaner/main/install.sh | bash
 #   PREFIX=$HOME/.local bash install.sh
-#   DISK_CLEANER_VERSION=v2.1.0 bash install.sh
+#   DISK_CLEANER_VERSION=v2.2.0 bash install.sh
 #   DISK_CLEANER_TARBALL=./dist/disk-cleaner-linux-x86_64.tar.gz bash install.sh
 set -euo pipefail
 
