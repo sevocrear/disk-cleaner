@@ -1,20 +1,28 @@
-# Disk Cleaner
+# 🧹 Disk Cleaner
+
+<p align="center">
+  <img src="docs/screenshot-main.png" alt="Disk Cleaner — main screen" width="800" />
+</p>
+
+> **In short:** a safe Ubuntu / Linux disk cleaner.  
+> Finds reclaimable space (Docker, caches, old files, apps, dupes, media) → **you review → then clean**.  
+> GUI defaults to **Trash**, not permanent delete. CLI included.
 
 Ubuntu / Linux disk cleaner with a pastel desktop GUI and a matching CLI.
 
-Finds reclaimable space from Docker leftovers, package caches, old downloads, unused apps, duplicate files, and media libraries. Review before delete. Manage mounted disks and the XDG trash.
+**Keywords:** Ubuntu disk cleaner · free disk space Linux · Docker prune GUI · duplicate file finder · trash restore · Flatpak / Snap cleanup
 
-**Keywords:** Ubuntu disk cleaner, free disk space Linux, Docker prune GUI, duplicate file finder, trash restore, Flatpak Snap cleanup.
+---
 
-## Install (one command)
+## ⚡ Install
 
-Linux x86_64:
+**One command** (Linux x86_64):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sevocrear/disk-cleaner/main/install.sh | bash
 ```
 
-This installs both tools into `~/.local`:
+Installs both tools into `~/.local`:
 
 | Command | What it is |
 | --- | --- |
@@ -29,7 +37,7 @@ disk-cleaner-uninstall
 curl -fsSL https://raw.githubusercontent.com/sevocrear/disk-cleaner/main/scripts/uninstall.sh | bash
 ```
 
-### Requirements
+### 📦 Requirements
 
 - **CLI:** no extra packages
 - **GUI runtime (Ubuntu/Debian):** `libwebkit2gtk-4.1-0` (usually already present on desktop installs)
@@ -40,7 +48,9 @@ sudo apt install libwebkit2gtk-4.1-0
 
 Ensure `~/.local/bin` is on your `PATH`.
 
-## Quick start
+---
+
+## 🚀 Quick start
 
 ```bash
 # Scan only (safe)
@@ -53,20 +63,25 @@ disk-cleaner --apply --yes
 disk-cleaner-app
 ```
 
-## What it cleans
+---
+
+## ✨ What it cleans
 
 | Phase | Examples |
 | --- | --- |
-| Docker | unused images, containers, build cache |
-| Caches | user caches, optional package-manager caches |
-| Files | old large files under home / extras |
-| Apps | idle Snap / Flatpak / AppImage / optional `/opt` |
-| Dupes | content-identical files above a size floor |
-| Media | large items under Pictures, Videos, Music, Downloads |
+| 🐳 Docker | unused images, containers, build cache |
+| 🗂️ Caches | user caches, optional package-manager caches |
+| 📄 Files | old large files under home / extras |
+| 📦 Apps | idle Snap / Flatpak / AppImage / optional `/opt` |
+| 🔁 Dupes | content-identical files above a size floor |
+| 🎬 Media | large items under Pictures, Videos, Music, Downloads |
 
-GUI panels: **Deep clean**, **Review**, **Disks**, **Trash**, **Settings**. After a clean you get a short report (files removed, space freed).
+GUI panels: **Deep clean** · **Review** · **Disks** · **Trash** · **Settings**.  
+After a clean you get a short report (files removed, space freed).
 
-## Safety
+---
+
+## 🛡️ Safety
 
 - Does not walk all of `/`
 - Hard deny list for system prefixes (`/usr`, `/etc`, …)
@@ -76,7 +91,9 @@ GUI panels: **Deep clean**, **Review**, **Disks**, **Trash**, **Settings**. Afte
 
 Config lives at `~/.config/disk-cleaner/config.toml`.
 
-## Build from source
+---
+
+## 🔧 Build from source
 
 Need: Rust stable, Node.js 18+, and on Linux the WebKitGTK 4.1 **dev** packages for the GUI:
 
@@ -100,7 +117,9 @@ cd ui && npm install && npm run build && cd ..
 cargo run --release -p disk-cleaner-app
 ```
 
-## CI
+---
+
+## 🧪 CI
 
 GitHub Actions runs on every push and pull request to `main`:
 
@@ -113,7 +132,9 @@ Block a bad push locally (optional):
 ln -sf ../../scripts/pre-push .git/hooks/pre-push
 ```
 
-## Project layout
+---
+
+## 📁 Project layout
 
 ```
 crates/disk-cleaner-engine/   shared scan / trash / disks engine
@@ -127,6 +148,8 @@ scripts/pre-push              local CI gate for git hooks
 reference/host_cleaner.py     original Python reference
 ```
 
-## License
+---
+
+## 📄 License
 
 MIT
