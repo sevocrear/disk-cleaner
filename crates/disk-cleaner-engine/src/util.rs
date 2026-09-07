@@ -46,7 +46,12 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
 
 pub fn format_bytes(n: u64) -> String {
     let n = n as f64;
-    for (unit, div) in [("T", 1024f64.powi(4)), ("G", 1024f64.powi(3)), ("M", 1024f64.powi(2)), ("K", 1024f64)] {
+    for (unit, div) in [
+        ("TB", 1024f64.powi(4)),
+        ("GB", 1024f64.powi(3)),
+        ("MB", 1024f64.powi(2)),
+        ("KB", 1024f64),
+    ] {
         if n >= div {
             return format!("{:.1}{unit}", n / div);
         }
@@ -231,6 +236,23 @@ mod tests {
     fn sizes() {
         assert_eq!(parse_size("1M").unwrap(), 1024 * 1024);
         assert_eq!(parse_size("5G").unwrap(), 5 * 1024 * 1024 * 1024);
-        assert!(format_bytes(1500).contains('K') || format_bytes(1500).contains('B'));
+        assert_eq!(parse_size("0.5kb").unwrap(), 512);
+        assert_eq!(parse_size("1mb").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size("1gb").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_size("3.4Gb").unwrap(), parse_size("3.4G").unwrap());
+        assert_eq!(parse_size("0.1b").unwrap(), 0);
+        assert_eq!(parse_size("2.5mB").unwrap(), 2_621_440);
+        assert_eq!(parse_size("1 MB").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size("100").unwrap(), 100);
+        assert!(parse_size("xyz").is_err());
+        assert!(parse_size("").is_err());
+
+        assert_eq!(format_bytes(1024 * 1024), "1.0MB");
+        assert_eq!(format_bytes(5 * 1024 * 1024 * 1024), "5.0GB");
+        assert_eq!(format_bytes(512), "512B");
+        assert!(format_bytes(1500).contains("KB") || format_bytes(1500).contains('B'));
+
+        let n = parse_size("3.4Gb").unwrap();
+        assert_eq!(parse_size(&format_bytes(n)).unwrap(), n);
     }
 }

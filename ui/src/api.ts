@@ -150,13 +150,38 @@ export async function apiOpenPath(path: string): Promise<void> {
   return invoke("open_path", { path });
 }
 
+/** Parse human sizes like `1mb`, `0.5kb`, `3.4Gb` (binary 1024ⁿ). Mirrors Rust `parse_size`. */
+export function parseSizeLocal(s: string): number | null {
+  const cleaned = s.trim().replace(/ /g, "");
+  if (!cleaned) return null;
+  const m = cleaned.match(/^(\d+(?:\.\d+)?)([kmgt]?b?)?$/i);
+  if (!m) return null;
+  const num = Number(m[1]);
+  if (!Number.isFinite(num)) return null;
+  const unit = (m[2] || "").toUpperCase().replace(/B+$/, "");
+  const mult =
+    unit === ""
+      ? 1
+      : unit === "K"
+        ? 1024
+        : unit === "M"
+          ? 1024 ** 2
+          : unit === "G"
+            ? 1024 ** 3
+            : unit === "T"
+              ? 1024 ** 4
+              : null;
+  if (mult === null) return null;
+  return Math.trunc(num * mult);
+}
+
 export function formatBytesLocal(n: number): string {
   const abs = Math.abs(n);
   for (const [u, d] of [
-    ["T", 1024 ** 4],
-    ["G", 1024 ** 3],
-    ["M", 1024 ** 2],
-    ["K", 1024],
+    ["TB", 1024 ** 4],
+    ["GB", 1024 ** 3],
+    ["MB", 1024 ** 2],
+    ["KB", 1024],
   ] as const) {
     if (abs >= d) return `${(n / d).toFixed(1)}${u}`;
   }
