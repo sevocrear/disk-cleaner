@@ -123,16 +123,35 @@ pub fn is_snap_protected(name: &str, protect_apps: &[String]) -> bool {
     SNAP_PROTECT_PREFIXES.iter().any(|p| name.starts_with(p))
 }
 
+/// Whether the root filesystem (`/`) is included. Uses safe allowlisted dirs, never walks all of `/`.
+pub fn scans_root_fs(cfg: &Config) -> bool {
+    cfg.scan_mounts.iter().any(|m| m == Path::new("/"))
+}
+
+/// Non-root mounts selected for scanning (walked from the mount point).
+pub fn extra_disk_scan_roots(cfg: &Config) -> Vec<PathBuf> {
+    cfg.scan_mounts
+        .iter()
+        .filter(|m| m.as_path() != Path::new("/"))
+        .filter(|m| m.exists())
+        .cloned()
+        .collect()
+}
+
 pub fn default_file_roots(cfg: &Config) -> Vec<PathBuf> {
     if let Some(ref roots) = cfg.file_roots {
         return roots.clone();
     }
-    let mut roots = vec![
-        PathBuf::from("/tmp"),
-        PathBuf::from("/var/tmp"),
-        cfg.home.join(".cache"),
-        cfg.home.join(".local/share/Trash"),
-    ];
+    let mut roots = Vec::new();
+    if scans_root_fs(cfg) {
+        roots.extend([
+            PathBuf::from("/tmp"),
+            PathBuf::from("/var/tmp"),
+            cfg.home.join(".cache"),
+            cfg.home.join(".local/share/Trash"),
+        ]);
+    }
+    roots.extend(extra_disk_scan_roots(cfg));
     roots.extend(cfg.extra_roots.clone());
     roots
         .into_iter()
@@ -145,33 +164,50 @@ pub fn default_dedupe_roots(cfg: &Config) -> Vec<PathBuf> {
         return cfg.dedupe_roots.clone();
     }
     let mut roots = Vec::new();
-    for r in [
-        cfg.home.join("Downloads"),
-        cfg.home.join("Applications"),
-        cfg.home.join("AppImages"),
-        PathBuf::from("/tmp"),
-        PathBuf::from("/var/tmp"),
-    ] {
-        if r.exists() {
-            roots.push(r);
+    if scans_root_fs(cfg) {
+        for r in [
+            cfg.home.join("Downloads"),
+            cfg.home.join("Applications"),
+            cfg.home.join("AppImages"),
+            PathBuf::from("/tmp"),
+            PathBuf::from("/var/tmp"),
+        ] {
+            if r.exists() {
+                roots.push(r);
+            }
         }
     }
+    roots.extend(extra_disk_scan_roots(cfg));
     roots.extend(cfg.extra_roots.clone());
     roots
 }
 
 pub fn default_media_roots(cfg: &Config) -> Vec<(String, PathBuf)> {
-    let pairs = [
-        ("Pictures", dirs::picture_dir().unwrap_or_else(|| cfg.home.join("Pictures"))),
-        ("Videos", dirs::video_dir().unwrap_or_else(|| cfg.home.join("Videos"))),
-        ("Music", dirs::audio_dir().unwrap_or_else(|| cfg.home.join("Music"))),
-        ("Downloads", dirs::download_dir().unwrap_or_else(|| cfg.home.join("Downloads"))),
-    ];
-    pairs
-        .into_iter()
-        .filter(|(_, p)| p.exists())
-        .map(|(n, p)| (n.to_string(), p))
-        .collect()
+    let mut out = Vec::new();
+    if scans_root_fs(cfg) {
+        let pairs = [
+            ("Pictures", dirs::picture_dir().unwrap_or_else(|| cfg.home.join("Pictures"))),
+            ("Videos", dirs::video_dir().unwrap_or_else(|| cfg.home.join("Videos"))),
+            ("Music", dirs::audio_dir().unwrap_or_else(|| cfg.home.join("Music"))),
+            ("Downloads", dirs::download_dir().unwrap_or_else(|| cfg.home.join("Downloads"))),
+        ];
+        out.extend(
+            pairs
+                .into_iter()
+                .filter(|(_, p)| p.exists())
+                .map(|(n, p)| (n.to_string(), p)),
+        );
+    }
+    // On extra disks, only known library folders — not the whole mount (that is "Old files").
+    for m in extra_disk_scan_roots(cfg) {
+        for name in ["Pictures", "Videos", "Music", "Downloads", "photos", "movies"] {
+            let p = m.join(name);
+            if p.is_dir() {
+                out.push((format!("{} ({})", name, m.display()), p));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -188,5 +224,32 @@ mod tests {
     fn protect_segment() {
         let globs = vec!["**/huggingface/**".into()];
         assert!(matches_protect(Path::new("/home/u/.cache/huggingface/x"), &globs));
+    }
+
+    #[test]
+    fn default_scan_mounts_is_root() {
+        let cfg = Config::default();
+        assert!(scans_root_fs(&cfg));
+        assert_eq!(cfg.scan_mounts, vec![PathBuf::from("/")]);
+    }
+
+    #[test]
+    fn file_roots_respect_scan_mounts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.home = tmp.path().join("home");
+        std::fs::create_dir_all(cfg.home.join(".cache")).unwrap();
+        cfg.scan_mounts = vec![PathBuf::from("/")];
+        let roots = default_file_roots(&cfg);
+        assert!(roots.iter().any(|r| r.ends_with(".cache")));
+        assert!(!roots.contains(&data));
+
+        cfg.scan_mounts = vec![data.clone()];
+        let roots = default_file_roots(&cfg);
+        assert!(roots.contains(&data));
+        assert!(!roots.iter().any(|r| r.ends_with(".cache")));
     }
 }

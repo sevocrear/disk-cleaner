@@ -13,6 +13,7 @@ const mockConfig = (): Config => ({
   min_dupe_size: 1024 * 1024,
   dedupe_keep: "newest",
   extra_roots: [],
+  scan_mounts: ["/"],
   dedupe_roots: [],
   protect_globs: [],
   protect_apps: [],
@@ -49,11 +50,20 @@ export async function apiListDisks(): Promise<DiskInfo[]> {
   if (browser) {
     return [
       {
-        name: "/dev/nvme0n1p2",
+        name: "/dev/nvme1n1p1",
         mount_point: "/",
         total_bytes: 512 * 1024 ** 3,
         available_bytes: 180 * 1024 ** 3,
         used_bytes: 332 * 1024 ** 3,
+        file_system: "ext4",
+        is_removable: false,
+      },
+      {
+        name: "/dev/nvme0n1p1",
+        mount_point: "/media/user/data",
+        total_bytes: 1024 * 1024 ** 3,
+        available_bytes: 500 * 1024 ** 3,
+        used_bytes: 524 * 1024 ** 3,
         file_system: "ext4",
         is_removable: false,
       },

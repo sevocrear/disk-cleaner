@@ -21,6 +21,10 @@ pub struct Config {
     pub dedupe_keep: String,
     #[serde(default)]
     pub extra_roots: Vec<PathBuf>,
+    /// Mount points included in Deep clean file/dupe/media scans. Default: `/` only.
+    /// Other mounts (e.g. `/media/...`) are walked when selected; `/` never walks the whole tree.
+    #[serde(default = "default_scan_mounts")]
+    pub scan_mounts: Vec<PathBuf>,
     #[serde(default)]
     pub dedupe_roots: Vec<PathBuf>,
     #[serde(default)]
@@ -85,6 +89,9 @@ fn default_min_size() -> u64 {
 fn default_dedupe_keep() -> String {
     "newest".into()
 }
+fn default_scan_mounts() -> Vec<PathBuf> {
+    vec![PathBuf::from("/")]
+}
 fn default_journal() -> String {
     "7d".into()
 }
@@ -113,6 +120,7 @@ impl Default for Config {
             min_dupe_size: default_min_size(),
             dedupe_keep: default_dedupe_keep(),
             extra_roots: vec![],
+            scan_mounts: default_scan_mounts(),
             dedupe_roots: vec![],
             protect_globs: vec![],
             protect_apps: vec![],

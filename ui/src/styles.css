@@ -180,6 +180,58 @@ button {
   padding-right: 4px;
 }
 
+.review-panel {
+  min-height: 0;
+}
+
+.virtual-list {
+  flex: 1;
+  min-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface) 70%, white);
+}
+
+.virtual-list-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.virtual-list-window {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+}
+
+.virtual-list .file-row {
+  margin: 0;
+  box-sizing: border-box;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.file-row-text {
+  min-width: 0;
+}
+
+.file-row-text .path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-row-text .meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .cat-row,
 .disk-row,
 .file-row,
@@ -198,8 +250,31 @@ button {
 }
 
 .disk-row {
-  grid-template-columns: 1fr;
+  grid-template-columns: 28px 1fr;
+  gap: 12px;
+  align-items: start;
+  cursor: pointer;
+}
+
+.disk-row > input[type="checkbox"] {
+  margin-top: 4px;
+}
+
+.disk-row-body {
+  display: grid;
   gap: 8px;
+  min-width: 0;
+}
+
+.disk-row .meta {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.disk-device {
+  margin-top: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
 }
 
 .file-row {
