@@ -180,6 +180,13 @@ button {
   padding-right: 4px;
 }
 
+.selection-bar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+}
+
 .review-panel {
   min-height: 0;
 }

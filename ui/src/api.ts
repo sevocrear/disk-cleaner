@@ -91,7 +91,55 @@ export async function apiEmptyTrash(): Promise<number> {
 
 export async function apiStartScan(config: Config): Promise<{ results: PhaseResult[]; total_bytes: number }> {
   if (browser) {
-    await new Promise((r) => setTimeout(r, 600));
+    await new Promise((r) => setTimeout(r, 400));
+    const large =
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("large") === "1";
+
+    if (large) {
+      const fileActions: Action[] = Array.from({ length: 2500 }, (_, i) => ({
+        id: `file-${i}`,
+        phase: "files",
+        kind: "delete_file",
+        path: `/home/user/.cache/blob-${i}`,
+        bytes: 40 * 1024 * 1024,
+        detail: "unused >60d",
+      }));
+      const dockerBytes = 115.8 * 1024 ** 3;
+      const filesBytes = fileActions.reduce((s, a) => s + a.bytes, 0);
+      return {
+        total_bytes: dockerBytes + filesBytes,
+        results: [
+          {
+            name: "docker",
+            reclaimable_bytes: dockerBytes,
+            notes: [],
+            actions: [
+              {
+                id: "docker-1",
+                phase: "docker",
+                kind: "docker_cmd",
+                path: "image_prune",
+                bytes: dockerBytes,
+                detail: "unused images",
+                command: ["docker", "image", "prune", "-a"],
+              },
+            ],
+          },
+          { name: "caches", reclaimable_bytes: 0, notes: [], actions: [] },
+          {
+            name: "files",
+            reclaimable_bytes: filesBytes,
+            notes: [],
+            actions: fileActions,
+          },
+          { name: "apps", reclaimable_bytes: 0, notes: [], actions: [] },
+          { name: "dupes", reclaimable_bytes: 0, notes: [], actions: [] },
+          { name: "media", reclaimable_bytes: 0, notes: [], actions: [] },
+        ],
+      };
+    }
+
     return {
       total_bytes: 2.4 * 1024 ** 3,
       results: [

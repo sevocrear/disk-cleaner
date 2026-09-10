@@ -731,7 +731,7 @@ dependencies = [
 
 [[package]]
 name = "disk-cleaner-app"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "dirs",
  "disk-cleaner-engine",
@@ -745,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "disk-cleaner-cli"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "clap",
  "disk-cleaner-engine",
@@ -754,7 +754,7 @@ dependencies = [
 
 [[package]]
 name = "disk-cleaner-engine"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "chrono",
  "dirs",

@@ -14,6 +14,24 @@ import {
   formatBytesLocal,
   parseSizeLocal,
 } from "./api";
+import { SelectionBar } from "./SelectionBar";
+import {
+  actionable,
+  canClean,
+  cleanButtonLabel,
+  defaultItemSelection,
+  emptyItemSelection,
+  isCommandAction,
+  isItemSelected,
+  isSelectionEmpty,
+  pruneItemSelection,
+  resolveSelectedActions,
+  selectionAfterEnablingCategory,
+  selectionWithAll,
+  selectionWithSized,
+  toggleItemSelection,
+  type ItemSelection,
+} from "./selection";
 import type { Action, ApplyProgress, ApplySummary, Config, DiskInfo, Panel, PhaseResult, TrashItem } from "./types";
 
 const NAV: { id: Panel; label: string }[] = [
@@ -45,12 +63,8 @@ const PHASE_META: Record<string, { title: string; blurb: string; risk: "low" | "
   },
 };
 
-/** Above this, Review stays virtualized and we skip auto-selecting every item. */
-const AUTO_SELECT_LIMIT = 2_000;
 const REVIEW_ROW_HEIGHT = 72;
 const REVIEW_OVERSCAN = 10;
-
-const COMMAND_KINDS = new Set(["docker_cmd", "cache_cmd", "snap_remove", "flatpak_uninstall"]);
 
 type PhaseStatus = "idle" | "pending" | "running" | "done";
 
@@ -58,15 +72,6 @@ type PhaseSummary = {
   reclaimable_bytes: number;
   action_count: number;
 };
-
-function isCommandAction(a: Action): boolean {
-  return COMMAND_KINDS.has(a.kind) || Boolean(a.command?.length);
-}
-
-/** Default-selected: sized work, plus tiny network prune when listed. */
-function isDefaultSelected(a: Action): boolean {
-  return a.bytes > 0 || a.path === "network_prune";
-}
 
 function formatActionSize(a: Action): string {
   if (a.path === "network_prune" && a.bytes === 0) return "0B";
@@ -81,7 +86,7 @@ function formatPhaseSize(
   if (status === "pending" || status === "running") return "…";
   if (status === "idle") return "—";
   if (r) {
-    const actions = r.actions.filter((a) => a.kind !== "rmdir_if_empty");
+    const actions = actionable(r.actions);
     if (!actions.length) return "—";
     const known = actions.reduce((s, a) => s + a.bytes, 0);
     if (known > 0) return formatBytesLocal(known);
@@ -105,15 +110,6 @@ function isOpenablePath(path: string): boolean {
   return path.startsWith("/") || path.startsWith("~");
 }
 
-function cleanButtonLabel(actions: Action[], useTrash: boolean, busy: boolean): string {
-  if (busy) return "Cleaning…";
-  if (!actions.length) return useTrash ? "Move to Trash" : "Clean";
-  const onlyCommands = actions.every(isCommandAction);
-  if (onlyCommands) return "Run commands";
-  if (useTrash && actions.every((a) => !isCommandAction(a))) return "Move to Trash";
-  return "Clean";
-}
-
 function emptyPhaseStatuses(): Record<string, PhaseStatus> {
   return Object.fromEntries(Object.keys(PHASE_META).map((k) => [k, "idle" as PhaseStatus]));
 }
@@ -123,10 +119,16 @@ function phaseSkipped(config: Config, name: string): boolean {
   return Boolean(config[key]);
 }
 
-function defaultSelectedIds(actions: Action[]): Set<string> {
-  const pick = actions.filter((a) => a.kind !== "rmdir_if_empty" && isDefaultSelected(a));
-  if (pick.length > AUTO_SELECT_LIMIT) return new Set();
-  return new Set(pick.map((a) => a.id));
+function setPhasesSkipped(config: Config, skip: boolean): Config {
+  return {
+    ...config,
+    skip_docker: skip,
+    skip_caches: skip,
+    skip_files: skip,
+    skip_apps: skip,
+    skip_dupes: skip,
+    skip_media: skip,
+  };
 }
 
 const SETTING_TIPS: Record<string, string> = {
@@ -160,7 +162,7 @@ export default function App() {
   const [results, setResults] = useState<PhaseResult[]>([]);
   const [phaseSummaries, setPhaseSummaries] = useState<Record<string, PhaseSummary>>({});
   const [phaseStatus, setPhaseStatus] = useState<Record<string, PhaseStatus>>(emptyPhaseStatuses);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selection, setSelection] = useState<ItemSelection>(() => emptyItemSelection());
   const [scanning, setScanning] = useState(false);
   const [scanPhase, setScanPhase] = useState("");
   const [scanDoneCount, setScanDoneCount] = useState(0);
@@ -254,13 +256,13 @@ export default function App() {
   );
 
   const allActions = useMemo(
-    () => visibleResults.flatMap((r) => r.actions.filter((a) => a.kind !== "rmdir_if_empty")),
+    () => visibleResults.flatMap((r) => actionable(r.actions)),
     [visibleResults],
   );
 
   const selectedActions = useMemo(
-    () => allActions.filter((a) => selected.has(a.id)),
-    [allActions, selected],
+    () => resolveSelectedActions(allActions, selection),
+    [allActions, selection],
   );
 
   const selectedSizeLabel = formatSelectionSize(selectedActions);
@@ -271,15 +273,7 @@ export default function App() {
   useEffect(() => {
     if (!config) return;
     const allowed = new Set(allActions.map((a) => a.id));
-    setSelected((prev) => {
-      let changed = false;
-      const next = new Set<string>();
-      for (const id of prev) {
-        if (allowed.has(id)) next.add(id);
-        else changed = true;
-      }
-      return changed ? next : prev;
-    });
+    setSelection((prev) => pruneItemSelection(prev, allowed));
   }, [config, allActions]);
 
   async function runScan() {
@@ -289,7 +283,7 @@ export default function App() {
     setScanPhase("starting");
     setResults([]);
     setPhaseSummaries({});
-    setSelected(new Set());
+    setSelection(emptyItemSelection());
     setScanDoneCount(0);
     setScanTotalCount(enabledPhaseCount);
     const pending: Record<string, PhaseStatus> = emptyPhaseStatuses();
@@ -299,13 +293,17 @@ export default function App() {
     setPhaseStatus(pending);
     try {
       const done = await apiStartScan(config);
+      const enabled = done.results.filter((r) => !phaseSkipped(config, r.name));
+      // Selection must land before/with results so Move to Trash is ready without Select all.
+      setResults(done.results);
+      setSelection(defaultItemSelection(enabled.flatMap((r) => r.actions)));
       startTransition(() => {
-        setResults(done.results);
-        const enabled = done.results.filter((r) => !phaseSkipped(config, r.name));
-        setSelected(defaultSelectedIds(enabled.flatMap((r) => r.actions)));
         setPhaseStatus((prev) => {
           const next = { ...prev };
-          for (const r of done.results) next[r.name] = "done";
+          for (const name of Object.keys(PHASE_META)) {
+            if (phaseSkipped(config, name)) next[name] = "idle";
+            else next[name] = "done";
+          }
           return next;
         });
         setPhaseSummaries((prev) => {
@@ -313,7 +311,7 @@ export default function App() {
           for (const r of done.results) {
             next[r.name] = {
               reclaimable_bytes: r.reclaimable_bytes,
-              action_count: r.actions.filter((a) => a.kind !== "rmdir_if_empty").length,
+              action_count: actionable(r.actions).length,
             };
           }
           return next;
@@ -352,7 +350,7 @@ export default function App() {
               .reduce((s, a) => s + a.bytes, 0),
           })),
         );
-        setSelected(new Set());
+        setSelection(emptyItemSelection());
       });
       refreshDisks();
       refreshTrash();
@@ -369,6 +367,36 @@ export default function App() {
     if (!config) return;
     const key = `skip_${name}` as keyof Config;
     setConfig({ ...config, [key]: skip });
+    // Checking a category must enable Move to Trash for its scan results.
+    if (!skip) {
+      setSelection((prev) => selectionAfterEnablingCategory(prev));
+    }
+  }
+
+  /** Select all categories + all scan items (includeAll — works for huge result sets). */
+  function selectAllDeepClean() {
+    if (!config) return;
+    setConfig(setPhasesSkipped(config, false));
+    setSelection(selectionWithAll());
+  }
+
+  /** Always clear category checkboxes and item selection. */
+  function deselectAllDeepClean() {
+    if (!config) return;
+    setConfig(setPhasesSkipped(config, true));
+    setSelection(emptyItemSelection());
+  }
+
+  function selectAllReview() {
+    setSelection(selectionWithAll());
+  }
+
+  function deselectAllReview() {
+    setSelection(emptyItemSelection());
+  }
+
+  function selectSizedReview() {
+    setSelection(selectionWithSized(allActions));
   }
 
   async function saveSettings(next?: Config) {
@@ -429,18 +457,23 @@ export default function App() {
             config={config}
             scanning={scanning}
             scanPhase={scanPhase}
+            selectedCount={selectedActions.length}
             onScan={runScan}
             onTogglePhase={togglePhase}
-            onOpenReview={() => setPanel("review")}
+            onSelectAll={selectAllDeepClean}
+            onDeselectAll={deselectAllDeepClean}
           />
         )}
 
         {panel === "review" && (
           <ReviewPanel
             actions={allActions}
-            selected={selected}
-            setSelected={setSelected}
-            autoSelectSkipped={allActions.filter(isDefaultSelected).length > AUTO_SELECT_LIMIT}
+            selection={selection}
+            selectedCount={selectedActions.length}
+            onSelectAll={selectAllReview}
+            onDeselectAll={deselectAllReview}
+            onSelectSized={selectSizedReview}
+            onToggleItem={(id, checked) => setSelection((prev) => toggleItemSelection(prev, id, checked))}
           />
         )}
 
@@ -467,16 +500,28 @@ export default function App() {
           <TrashPanel
             items={trash}
             onRestore={async (item) => {
-              await apiRestoreTrash(item);
-              refreshTrash();
+              try {
+                await apiRestoreTrash(item);
+                refreshTrash();
+              } catch (e) {
+                setError(String(e));
+              }
             }}
             onDelete={async (item) => {
-              await apiDeleteTrash(item);
-              refreshTrash();
+              try {
+                await apiDeleteTrash(item);
+                refreshTrash();
+              } catch (e) {
+                setError(String(e));
+              }
             }}
             onEmpty={async () => {
-              await apiEmptyTrash();
-              refreshTrash();
+              try {
+                await apiEmptyTrash();
+                refreshTrash();
+              } catch (e) {
+                setError(String(e));
+              }
             }}
           />
         )}
@@ -515,12 +560,18 @@ export default function App() {
               )}
             </div>
             <div style={{ display: "flex", gap: 10 }}>
-              <button className="btn btn-ghost" onClick={() => setPanel("review")} disabled={!allActions.length && !scanning}>
-                Review
-              </button>
+              {panel === "scan" && (
+                <button
+                  className="btn btn-ghost"
+                  onClick={() => setPanel("review")}
+                  disabled={!allActions.length && !scanning}
+                >
+                  Review
+                </button>
+              )}
               <button
                 className="btn btn-primary"
-                disabled={!selectedActions.length || busy || scanning}
+                disabled={!canClean(selectedActions.length, busy, scanning)}
                 onClick={cleanSelected}
               >
                 {scanning
@@ -575,9 +626,11 @@ function ScanPanel({
   config,
   scanning,
   scanPhase,
+  selectedCount,
   onScan,
   onTogglePhase,
-  onOpenReview,
+  onSelectAll,
+  onDeselectAll,
 }: {
   results: PhaseResult[];
   phaseSummaries: Record<string, PhaseSummary>;
@@ -585,9 +638,11 @@ function ScanPanel({
   config: Config;
   scanning: boolean;
   scanPhase: string;
+  selectedCount: number;
   onScan: () => void;
   onTogglePhase: (name: string, skip: boolean) => void;
-  onOpenReview: () => void;
+  onSelectAll: () => void;
+  onDeselectAll: () => void;
 }) {
   const byName = Object.fromEntries(results.map((r) => [r.name, r]));
   const phases = Object.keys(PHASE_META);
@@ -596,9 +651,7 @@ function ScanPanel({
   const knownTotal = enabled.reduce((s, name) => {
     const r = byName[name];
     if (r) {
-      return (
-        s + r.actions.filter((a) => a.kind !== "rmdir_if_empty").reduce((x, a) => x + a.bytes, 0)
-      );
+      return s + actionable(r.actions).reduce((x, a) => x + a.bytes, 0);
     }
     return s + (phaseSummaries[name]?.reclaimable_bytes || 0);
   }, 0);
@@ -609,7 +662,7 @@ function ScanPanel({
         ? formatBytesLocal(knownTotal)
         : enabled.some((name) => {
             const r = byName[name];
-            if (r) return r.actions.some((a) => a.kind !== "rmdir_if_empty");
+            if (r) return actionable(r.actions).length > 0;
             return (phaseSummaries[name]?.action_count || 0) > 0;
           })
           ? "0B"
@@ -621,7 +674,7 @@ function ScanPanel({
       <div className="panel-header" style={{ display: "flex", justifyContent: "space-between", gap: 16 }}>
         <div>
           <h2>Deep cleanup</h2>
-          <p>Choose categories, scan safely, then review before anything is removed.</p>
+          <p>Choose categories, scan safely, then select items before anything is removed.</p>
         </div>
         <div style={{ textAlign: "right" }}>
           <div className="meta">Can reclaim</div>
@@ -639,6 +692,8 @@ function ScanPanel({
           </p>
         </div>
       )}
+
+      <SelectionBar disabled={scanning} onSelectAll={onSelectAll} onDeselectAll={onDeselectAll} />
 
       <div className="row-list">
         {phases.map((name) => {
@@ -665,15 +720,18 @@ function ScanPanel({
         })}
       </div>
 
+      {(results.length > 0 || anyDone) && !scanning && selectedCount === 0 && (
+        <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0 0 12px" }}>
+          {enabled.length === 0
+            ? "All categories cleared. Use Select all or check a category to clean."
+            : "No items selected. Check a category or use Select all."}
+        </p>
+      )}
+
       <div>
         <button className="btn btn-primary" onClick={onScan} disabled={scanning}>
           {scanning ? "Scanning…" : results.length || anyDone ? "Scan again" : "Scan"}
         </button>
-        {(results.length > 0 || anyDone) && !scanning && (
-          <button className="btn btn-ghost" style={{ marginLeft: 8 }} onClick={onOpenReview}>
-            Review
-          </button>
-        )}
       </div>
     </div>
   );
@@ -681,14 +739,20 @@ function ScanPanel({
 
 function ReviewPanel({
   actions,
-  selected,
-  setSelected,
-  autoSelectSkipped,
+  selection,
+  selectedCount,
+  onSelectAll,
+  onDeselectAll,
+  onSelectSized,
+  onToggleItem,
 }: {
   actions: Action[];
-  selected: Set<string>;
-  setSelected: (s: Set<string>) => void;
-  autoSelectSkipped: boolean;
+  selection: ItemSelection;
+  selectedCount: number;
+  onSelectAll: () => void;
+  onDeselectAll: () => void;
+  onSelectSized: () => void;
+  onToggleItem: (id: string, checked: boolean) => void;
 }) {
   if (!actions.length) {
     return (
@@ -702,53 +766,36 @@ function ReviewPanel({
     );
   }
 
-  function selectSized() {
-    startTransition(() => {
-      setSelected(new Set(actions.filter(isDefaultSelected).map((a) => a.id)));
-    });
-  }
-
-  function selectAll() {
-    startTransition(() => {
-      setSelected(new Set(actions.map((a) => a.id)));
-    });
-  }
-
   return (
     <div className="panel review-panel">
       <div className="panel-header">
         <h2>Review</h2>
         <p>
           Showing {actions.length.toLocaleString()} items from checked categories only.
-          {autoSelectSkipped && selected.size === 0
-            ? " Large result — nothing pre-selected; use Select sized / Select all."
-            : ""}
+          {selectedCount === 0 ? " Nothing selected — use Select sized / Select all." : ""}
         </p>
       </div>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <button className="btn btn-ghost" onClick={selectSized}>
-          Select sized
-        </button>
-        <button className="btn btn-ghost" onClick={selectAll}>
-          Select all
-        </button>
-        <button className="btn btn-ghost" onClick={() => setSelected(new Set())}>
-          Clear
-        </button>
-      </div>
-      <VirtualActionList actions={actions} selected={selected} setSelected={setSelected} />
+      <SelectionBar
+        showSized
+        disableSelectAll={actions.length === 0}
+        disableDeselectAll={selectedCount === 0}
+        onSelectSized={onSelectSized}
+        onSelectAll={onSelectAll}
+        onDeselectAll={onDeselectAll}
+      />
+      <VirtualActionList actions={actions} selection={selection} onToggleItem={onToggleItem} />
     </div>
   );
 }
 
 function VirtualActionList({
   actions,
-  selected,
-  setSelected,
+  selection,
+  onToggleItem,
 }: {
   actions: Action[];
-  selected: Set<string>;
-  setSelected: (s: Set<string>) => void;
+  selection: ItemSelection;
+  onToggleItem: (id: string, checked: boolean) => void;
 }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -785,13 +832,8 @@ function VirtualActionList({
             <div className="file-row" key={a.id} style={{ height: REVIEW_ROW_HEIGHT }}>
               <input
                 type="checkbox"
-                checked={selected.has(a.id)}
-                onChange={(e) => {
-                  const next = new Set(selected);
-                  if (e.target.checked) next.add(a.id);
-                  else next.delete(a.id);
-                  setSelected(next);
-                }}
+                checked={isItemSelected(a.id, selection)}
+                onChange={(e) => onToggleItem(a.id, e.target.checked)}
               />
               <div className="file-row-text">
                 <div className="path" title={a.path}>
