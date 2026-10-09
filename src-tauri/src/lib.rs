@@ -19,6 +19,16 @@ pub fn run() {
             commands::apply_selected,
             commands::format_bytes_cmd,
             commands::open_path,
+            commands::overview_scan,
+            commands::overview_cancel,
+            commands::overview_list,
+            commands::overview_in_use,
+            commands::overview_delete,
+            commands::docker_inventory,
+            commands::docker_remove_images,
+            commands::docker_prune_build_cache,
+            commands::docker_tracker_install,
+            commands::docker_tracker_uninstall,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

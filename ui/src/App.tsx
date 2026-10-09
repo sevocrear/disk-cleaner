@@ -14,6 +14,8 @@ import {
   formatBytesLocal,
   parseSizeLocal,
 } from "./api";
+import { DockerPanel } from "./DockerPanel";
+import { OverviewPanel } from "./OverviewPanel";
 import { SelectionBar } from "./SelectionBar";
 import {
   actionable,
@@ -37,6 +39,8 @@ import type { Action, ApplyProgress, ApplySummary, Config, DiskInfo, Panel, Phas
 const NAV: { id: Panel; label: string }[] = [
   { id: "scan", label: "Deep clean" },
   { id: "review", label: "Review" },
+  { id: "overview", label: "Overview" },
+  { id: "docker", label: "Docker" },
   { id: "disks", label: "Disks" },
   { id: "trash", label: "Trash" },
   { id: "settings", label: "Settings" },
@@ -476,6 +480,18 @@ export default function App() {
             onToggleItem={(id, checked) => setSelection((prev) => toggleItemSelection(prev, id, checked))}
           />
         )}
+
+        {panel === "overview" && (
+          <OverviewPanel
+            config={config}
+            onChanged={() => {
+              refreshDisks();
+              refreshTrash();
+            }}
+          />
+        )}
+
+        {panel === "docker" && <DockerPanel config={config} />}
 
         {panel === "disks" && (
           <DisksPanel

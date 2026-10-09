@@ -1,3 +1,6 @@
+mod browse;
+mod docker_cmd;
+
 use clap::{Parser, Subcommand};
 use disk_cleaner_engine::config::Config;
 use disk_cleaner_engine::execute::{default_apply_jobs, execute_actions_parallel};
@@ -95,6 +98,29 @@ struct Cli {
 enum Commands {
     /// Run cleaner in CLI mode (default when --cli is used from GUI binary)
     Cli,
+    /// Browse disk usage interactively (like ncdu) and delete what you pick
+    Browse {
+        /// Directory to scan (default: current directory)
+        path: Option<PathBuf>,
+    },
+    /// List Docker images by last use and build cache age (--docker-unused-days)
+    Docker {
+        /// Print the full inventory as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record Docker image usage from `docker events` (runs until stopped)
+    DockerTrack {
+        /// Install and start as a systemd user service
+        #[arg(long, conflicts_with_all = ["uninstall", "status"])]
+        install: bool,
+        /// Stop and remove the systemd user service
+        #[arg(long, conflicts_with = "status")]
+        uninstall: bool,
+        /// Show tracker status as JSON
+        #[arg(long)]
+        status: bool,
+    },
 }
 
 fn config_from_cli(cli: &Cli) -> Result<Config, String> {
@@ -153,6 +179,26 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let sub = match &cli.command {
+        Some(Commands::Browse { path }) => Some(browse::run(path.clone(), cfg.clone())),
+        Some(Commands::Docker { json }) => Some(docker_cmd::list(&cfg, *json)),
+        Some(Commands::DockerTrack {
+            install,
+            uninstall,
+            status,
+        }) => Some(docker_cmd::track(&cfg, *install, *uninstall, *status)),
+        Some(Commands::Cli) | None => None,
+    };
+    if let Some(res) = sub {
+        return match res {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     let jobs = cli.jobs.unwrap_or_else(default_apply_jobs).max(1);
 
     eprintln!("… scanning phases");

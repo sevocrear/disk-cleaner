@@ -582,3 +582,406 @@ button {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---------- Overview & Docker ---------- */
+
+.overview-panel,
+.docker-panel {
+  overflow: auto;
+}
+
+.overview-roots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.root-input {
+  flex: 1;
+  min-width: 240px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: white;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9rem;
+}
+
+.root-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+}
+
+.chip-btn {
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.chip-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.check.small {
+  font-size: 0.85rem;
+  color: var(--muted);
+  padding: 0 0 0 6px;
+}
+
+.inline-error {
+  color: #7a4545;
+  background: color-mix(in srgb, var(--danger) 12%, white);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.meta {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.scan-status p {
+  margin: 8px 0 0;
+}
+
+.space-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.space-card p {
+  margin: 0;
+}
+
+.space-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.hidden-space ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  line-height: 1.6;
+}
+
+.crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.crumb-btn {
+  padding: 4px 6px;
+  border-radius: 8px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.crumb-btn:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.crumb-btn:disabled {
+  color: var(--ink);
+  cursor: default;
+}
+
+.crumb-sep {
+  color: var(--muted);
+}
+
+.crumb-total {
+  margin-left: auto;
+}
+
+.btn-sm {
+  padding: 6px 10px;
+  font-size: 0.85rem;
+  border-radius: 10px;
+}
+
+.tree-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 200px;
+  max-height: 56vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 6px;
+  background: color-mix(in srgb, var(--surface) 70%, white);
+  outline: none;
+}
+
+.tree-list:focus-visible {
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.tree-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 150px 64px 70px 80px 60px;
+  gap: 10px;
+  align-items: center;
+  padding: 7px 10px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+}
+
+.tree-row:hover {
+  background: var(--surface);
+}
+
+.tree-row.focused {
+  border-color: var(--accent);
+  background: var(--surface);
+}
+
+.tree-row.picked {
+  background: color-mix(in srgb, var(--accent-soft) 45%, white);
+}
+
+.tree-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.name-btn,
+.name-plain {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.name-btn.dir {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.name-btn.dir:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.name-plain.collapsed,
+.name-plain.other_fs {
+  color: var(--muted);
+}
+
+.tree-share {
+  display: grid;
+  grid-template-columns: 1fr 44px;
+  gap: 6px;
+  align-items: center;
+}
+
+.tree-items,
+.tree-age {
+  text-align: right;
+}
+
+.tree-size {
+  text-align: right;
+}
+
+.badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 6px;
+  white-space: nowrap;
+  background: var(--line);
+  color: var(--muted);
+}
+
+.badge.warn {
+  background: color-mix(in srgb, #d4c4a0 45%, white);
+  color: #6b5a2e;
+}
+
+.badge.ok {
+  background: color-mix(in srgb, var(--ok) 30%, white);
+  color: #2f5a44;
+}
+
+.show-more {
+  align-self: center;
+  margin: 8px 0;
+}
+
+.keys-hint {
+  margin: -8px 0 0;
+}
+
+.overview-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  margin-top: auto;
+}
+
+.confirm-sheet {
+  width: min(620px, calc(100% - 40px));
+  text-align: left;
+}
+
+.confirm-body {
+  max-height: 50vh;
+  overflow: auto;
+}
+
+.confirm-list {
+  margin: 0 0 12px;
+  padding-left: 18px;
+  line-height: 1.5;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.btn-danger-solid {
+  background: #b06c6c;
+  color: white;
+}
+
+.warn-box {
+  background: color-mix(in srgb, var(--danger) 14%, white);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  color: #6b3b3b;
+}
+
+.warn-box ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.result-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ok) 20%, white);
+}
+
+.result-note.has-failures {
+  background: color-mix(in srgb, #d4c4a0 35%, white);
+}
+
+.result-note ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.days-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.days-input {
+  width: 70px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  text-align: right;
+}
+
+.days-input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.docker-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.docker-table {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 6px;
+  background: color-mix(in srgb, var(--surface) 70%, white);
+}
+
+.docker-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 90px 190px minmax(0, 160px);
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 10px;
+}
+
+.docker-row.head {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.docker-row.stale {
+  background: color-mix(in srgb, #d4c4a0 16%, white);
+}
+
+.docker-name {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.docker-name strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 900px) {
+  .tree-row {
+    grid-template-columns: 24px minmax(0, 1fr) 80px 60px;
+  }
+  .tree-share,
+  .tree-items,
+  .tree-age {
+    display: none;
+  }
+  .docker-cards {
+    grid-template-columns: 1fr;
+  }
+  .docker-row {
+    grid-template-columns: 24px minmax(0, 1fr) 80px;
+  }
+  .docker-row > :nth-child(4),
+  .docker-row > :nth-child(5) {
+    display: none;
+  }
+}

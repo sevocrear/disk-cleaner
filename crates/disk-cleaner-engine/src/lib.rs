@@ -4,12 +4,17 @@ pub mod action;
 pub mod cmd;
 pub mod config;
 pub mod disks;
+pub mod docker_inventory;
+pub mod docker_track;
 pub mod execute;
+pub mod inuse;
 pub mod phases;
 pub mod report;
 pub mod run;
 pub mod safety;
+pub mod space;
 pub mod trash;
+pub mod tree;
 pub mod util;
 
 pub use action::{Action, ApplyProgress, ApplySummary, PhaseResult};

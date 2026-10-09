@@ -15,7 +15,9 @@ export default defineConfig({
     sourcemap: !!process.env.TAURI_DEBUG,
   },
   test: {
-    environment: "node",
-    include: ["src/**/*.test.ts"],
+    environment: "jsdom",
+    include: ["src/**/*.test.{ts,tsx}"],
+    setupFiles: ["src/test-setup.ts"],
+    restoreMocks: true,
   },
 });

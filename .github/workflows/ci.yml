@@ -50,8 +50,8 @@ jobs:
           npm ci
           npm run build
 
-      - name: Engine unit tests
-        run: cargo test -p disk-cleaner-engine --all-targets
+      - name: Engine + CLI tests
+        run: cargo test -p disk-cleaner-engine -p disk-cleaner-cli --all-targets
 
       - name: Workspace check (CLI + GUI)
         run: cargo check --workspace --all-targets
@@ -76,3 +76,10 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+      - run: npm test
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: E2E (Playwright)
+        run: npm run test:e2e

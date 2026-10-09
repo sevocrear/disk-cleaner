@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.4.0"
+version = "2.5.0"
 edition = "2021"
 license = "MIT"
 authors = ["Disk Cleaner"]
@@ -29,3 +29,6 @@ which = "7"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
 tracing = "0.1"
+rayon = "1"
+libc = "0.2"
+ratatui = "0.29"
