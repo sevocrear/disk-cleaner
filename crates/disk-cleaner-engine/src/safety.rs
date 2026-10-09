@@ -43,6 +43,72 @@ pub fn path_is_denied(path: &Path) -> bool {
     false
 }
 
+/// Why a user-picked path (Overview / browse) must not be deleted, or None if allowed.
+///
+/// Blocks relative paths, `/`, system prefixes, the home dir and its ancestors,
+/// and mount points. Protect globs are *not* a block here — the UI warns instead.
+pub fn manual_delete_block_reason(path: &Path, home: &Path) -> Option<String> {
+    if !path.is_absolute() {
+        return Some("not an absolute path".into());
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return Some("path contains . or ..".into());
+    }
+    if path.parent().is_none() {
+        return Some("filesystem root".into());
+    }
+    // Check the path itself (not a symlink target) against system prefixes.
+    let s = path.to_string_lossy();
+    if DENY_PREFIXES
+        .iter()
+        .any(|p| s == *p || s.starts_with(&format!("{p}/")))
+    {
+        return Some("system path".into());
+    }
+    if path_is_denied(path) && !is_symlink(path) {
+        return Some("system path".into());
+    }
+    if home.starts_with(path) {
+        return Some("home directory or its parent".into());
+    }
+    if is_mount_point(path) {
+        return Some("mount point".into());
+    }
+    None
+}
+
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+pub fn is_mount_point(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.is_dir() {
+        return false;
+    }
+    let Some(parent) = path.parent() else {
+        return true;
+    };
+    match std::fs::metadata(parent) {
+        Ok(pm) => pm.dev() != meta.dev() || pm.ino() == meta.ino(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(unix))]
+pub fn is_mount_point(_path: &Path) -> bool {
+    false
+}
+
 pub fn matches_protect(path: &Path, globs: &[String]) -> bool {
     let s = path.to_string_lossy();
     let name = path
@@ -218,6 +284,34 @@ mod tests {
     fn denies_usr() {
         assert!(path_is_denied(Path::new("/usr/bin/ls")));
         assert!(!path_is_denied(Path::new("/tmp/foo")));
+    }
+
+    #[test]
+    fn manual_delete_guards() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(home.join("junk")).unwrap();
+        let block = |p: &Path| manual_delete_block_reason(p, &home);
+
+        assert!(block(&home.join("junk")).is_none());
+        assert!(block(&home.join("missing-file")).is_none());
+        assert!(block(&home).unwrap().contains("home"));
+        assert!(block(tmp.path()).unwrap().contains("home"));
+        assert!(block(Path::new("/")).is_some());
+        assert!(block(Path::new("/usr/share")).unwrap().contains("system"));
+        assert!(block(Path::new("/var/lib/docker")).is_some());
+        assert!(block(Path::new("relative/x")).is_some());
+        assert!(block(&home.join("junk/../junk")).is_some());
+        // /proc is a separate filesystem → mount point (and denied anyway).
+        assert!(block(Path::new("/proc")).is_some());
+    }
+
+    #[test]
+    fn mount_point_detection() {
+        assert!(is_mount_point(Path::new("/proc")));
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_mount_point(tmp.path()));
+        assert!(!is_mount_point(&tmp.path().join("missing")));
     }
 
     #[test]

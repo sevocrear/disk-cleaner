@@ -18,6 +18,9 @@ fn write_exec(path: &Path, body: &str) {
 
 fn with_path_prefix<T>(bindir: &Path, f: impl FnOnce() -> T) -> T {
     let _guard = PATH_LOCK.lock().unwrap();
+    // Keep the usage-tracker store hermetic (it lives under XDG_DATA_HOME).
+    let old_data = std::env::var_os("XDG_DATA_HOME");
+    std::env::set_var("XDG_DATA_HOME", bindir.join("data"));
     let old = std::env::var_os("PATH");
     let mut new_path = bindir.display().to_string();
     if let Some(ref o) = old {
@@ -29,6 +32,10 @@ fn with_path_prefix<T>(bindir: &Path, f: impl FnOnce() -> T) -> T {
     match old {
         Some(o) => std::env::set_var("PATH", o),
         None => std::env::remove_var("PATH"),
+    }
+    match old_data {
+        Some(o) => std::env::set_var("XDG_DATA_HOME", o),
+        None => std::env::remove_var("XDG_DATA_HOME"),
     }
     out
 }
@@ -65,16 +72,13 @@ case "$*" in
     echo -e "Local Volumes\t0B (0%)"
     echo -e "Build Cache\t0B (0%)"
     ;;
-  *"builder du"*)
-    echo -e "Reclaimable:\t0B"
-    ;;
   *"network ls"*)
     ;;
-  *"ps -a --format"*)
+  *"image ls -q"*)
     ;;
   *"ps -aq"*)
     ;;
-  *"images --format"*)
+  *"buildx du"*)
     ;;
   *)
     echo "unexpected: $*" >&2
@@ -123,11 +127,11 @@ case "$*" in
     ;;
   *"network ls"*)
     ;;
-  *"ps -a --format"*)
+  *"image ls -q"*)
     ;;
   *"ps -aq"*)
     ;;
-  *"images --format"*)
+  *"buildx du"*)
     ;;
   *)
     echo "unexpected: $*" >&2
@@ -186,11 +190,11 @@ case "$*" in
   *"network ls"*)
     echo deadbeef
     ;;
-  *"ps -a --format"*)
+  *"image ls -q"*)
     ;;
   *"ps -aq"*)
     ;;
-  *"images --format"*)
+  *"buildx du"*)
     ;;
   *)
     exit 1
@@ -206,8 +210,93 @@ esac
     let result = with_path_prefix(&bindir, || phase_docker(&cfg));
     let paths: Vec<_> = result.actions.iter().map(|a| a.path.as_str()).collect();
     assert!(paths.contains(&"container_prune"));
-    assert!(paths.contains(&"builder_prune"));
+    // No buildx records reported → nothing older than the threshold.
+    assert!(!paths.contains(&"builder_prune"));
     assert!(paths.contains(&"network_prune"));
     assert!(paths.contains(&"volume_prune"));
     assert!(!paths.contains(&"image_rmi"));
+}
+
+#[test]
+fn docker_images_by_last_use_and_cache_by_age() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bindir = tmp.path().join("bin");
+    fs::create_dir_all(&bindir).unwrap();
+    let now = chrono::Utc::now();
+    let ago = |days: i64| (now - chrono::Duration::days(days)).to_rfc3339();
+    let images = format!(
+        r#"[{{"Id":"sha256:stale","RepoTags":["old:1"],"Created":"{old}","Size":3000,"Metadata":{{"LastTagTime":"{old}"}}}},
+{{"Id":"sha256:pulled","RepoTags":["clickhouse:23"],"Created":"{ancient}","Size":5000,"Metadata":{{"LastTagTime":"{fresh}"}}}},
+{{"Id":"sha256:busy","RepoTags":["svc:1"],"Created":"{ancient}","Size":7000,"Metadata":{{"LastTagTime":"0001-01-01T00:00:00Z"}}}}]"#,
+        old = ago(90),
+        ancient = ago(700),
+        fresh = ago(1),
+    );
+    let containers = format!(
+        r#"[{{"Id":"c1","Name":"/svc","Image":"sha256:busy","Created":"{t}","Config":{{"Image":"svc:1"}},"State":{{"Running":false,"StartedAt":"{t}","FinishedAt":"{t}"}}}}]"#,
+        t = ago(200)
+    );
+    fs::write(bindir.join("images.json"), images).unwrap();
+    fs::write(bindir.join("containers.json"), containers).unwrap();
+    fs::write(
+        bindir.join("du.jsonl"),
+        "{\"ID\":\"a\",\"Size\":\"2GB\",\"CreatedAt\":\"2026-01-01 00:00:00.0 +0000 UTC\",\"LastUsedAt\":\"2 months ago\",\"Reclaimable\":true}\n\
+         {\"ID\":\"b\",\"Size\":\"1GB\",\"CreatedAt\":\"2026-01-01 00:00:00.0 +0000 UTC\",\"LastUsedAt\":\"2 hours ago\",\"Reclaimable\":true}\n",
+    )
+    .unwrap();
+    write_exec(
+        &bindir.join("docker"),
+        &format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+D="{dir}"
+case "$*" in
+  *"system df"*)
+    echo -e "Containers\t0B (0%)"
+    echo -e "Images\t15GB (100%)"
+    echo -e "Local Volumes\t0B (0%)"
+    echo -e "Build Cache\t3GB (100%)"
+    ;;
+  "image ls -q --no-trunc") printf 'sha256:stale\nsha256:pulled\nsha256:busy\nsha256:stale\n' ;;
+  "image inspect "*) cat "$D/images.json" ;;
+  "ps -aq --no-trunc") echo c1 ;;
+  "inspect c1") cat "$D/containers.json" ;;
+  "buildx du --format json") cat "$D/du.jsonl" ;;
+  *"network ls"*) ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+"#,
+            dir = bindir.display()
+        ),
+    );
+
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let mut cfg = base_cfg(&home);
+    cfg.include_docker_volumes = false;
+    cfg.docker_unused_days = 30;
+
+    let result = with_path_prefix(&bindir, || phase_docker(&cfg));
+    let rmi = result
+        .actions
+        .iter()
+        .find(|a| a.path == "image_rmi")
+        .unwrap_or_else(|| panic!("no image_rmi; notes={:?}", result.notes));
+    // Only the image unused for 90 days: the pulled one is fresh, the busy one has a container.
+    assert_eq!(
+        rmi.command.as_ref().unwrap(),
+        &vec!["docker", "rmi", "-f", "sha256:stale"]
+    );
+    assert_eq!(rmi.bytes, 3000);
+
+    let prune = result
+        .actions
+        .iter()
+        .find(|a| a.path == "builder_prune")
+        .expect("builder_prune");
+    assert_eq!(
+        prune.command.as_ref().unwrap(),
+        &vec!["docker", "builder", "prune", "-af", "--filter", "until=720h"]
+    );
+    assert_eq!(prune.bytes, 2 * 1024 * 1024 * 1024, "only the 2-month-old record");
 }

@@ -9,19 +9,35 @@ use disk_cleaner_engine::trash::{
     TrashItem,
 };
 use disk_cleaner_engine::util::format_bytes;
+use disk_cleaner_engine::docker_inventory::{
+    builder_prune_command, image_remove_actions, inventory as docker_inv, DockerInventory,
+};
+use disk_cleaner_engine::docker_track::{self, TrackerStatus};
+use disk_cleaner_engine::inuse::{find_in_use, InUse};
+use disk_cleaner_engine::space::{space_accounting, SpaceAccounting};
+use disk_cleaner_engine::tree::{
+    scan_tree, DeleteOutcome, DirListing, ScanOptions, SizeTree, TreeScanProgress,
+};
 use serde::Serialize;
-use std::sync::Mutex;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 
 pub struct AppState {
     pub last_results: Mutex<Vec<PhaseResult>>,
+    /// Overview size tree (scanned once, browsed and edited in memory).
+    pub overview: Arc<Mutex<Option<SizeTree>>>,
+    pub overview_cancel: Arc<AtomicBool>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
             last_results: Mutex::new(Vec::new()),
+            overview: Arc::new(Mutex::new(None)),
+            overview_cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -209,4 +225,204 @@ pub fn open_path(path: String) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+// ---------- Overview (ncdu-style browser) ----------
+
+#[derive(Clone, Serialize)]
+pub struct OverviewScanDone {
+    pub root: String,
+    pub total_bytes: u64,
+    pub cancelled: bool,
+    pub unreadable_dirs: u64,
+    pub accounting: Option<SpaceAccounting>,
+    pub listing: Option<DirListing>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct OverviewDeleteDone {
+    pub outcome: DeleteOutcome,
+}
+
+#[derive(Clone, Serialize)]
+pub struct OverviewDeleteProgress {
+    pub done: usize,
+    pub total: usize,
+    pub path: String,
+}
+
+fn lock_err<T>(e: std::sync::PoisonError<T>) -> String {
+    e.to_string()
+}
+
+#[tauri::command]
+pub async fn overview_scan(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    cross_fs: bool,
+) -> Result<OverviewScanDone, String> {
+    let root = PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|e| format!("{path}: {e}"))?;
+    if !root.is_dir() {
+        return Err(format!("not a directory: {}", root.display()));
+    }
+    let cancel = state.overview_cancel.clone();
+    cancel.store(false, Ordering::Relaxed);
+    let slot = state.overview.clone();
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let opts = ScanOptions {
+            cross_fs,
+            ..Default::default()
+        };
+        let last_emit = Mutex::new(Instant::now() - Duration::from_secs(1));
+        let tree = scan_tree(&root, &opts, &cancel, |p: TreeScanProgress| {
+            let mut guard = last_emit.lock().unwrap_or_else(|e| e.into_inner());
+            if guard.elapsed() >= Duration::from_millis(150) {
+                *guard = Instant::now();
+                let _ = app2.emit("overview-progress", p);
+            }
+        });
+        let cfg = Config::load();
+        let accounting = if tree.cancelled {
+            None
+        } else {
+            space_accounting(&root, tree.total_bytes(), tree.unreadable_dirs, &cfg)
+        };
+        let done = OverviewScanDone {
+            root: root.to_string_lossy().into_owned(),
+            total_bytes: tree.total_bytes(),
+            cancelled: tree.cancelled,
+            unreadable_dirs: tree.unreadable_dirs,
+            accounting,
+            listing: tree.listing(&root, &cfg),
+        };
+        *slot.lock().map_err(lock_err)? = Some(tree);
+        Ok(done)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn overview_cancel(state: State<'_, AppState>) {
+    state.overview_cancel.store(true, Ordering::Relaxed);
+}
+
+#[tauri::command]
+pub fn overview_list(state: State<'_, AppState>, path: String) -> Result<DirListing, String> {
+    let guard = state.overview.lock().map_err(lock_err)?;
+    let tree = guard.as_ref().ok_or("nothing scanned yet")?;
+    tree.listing(&PathBuf::from(&path), &Config::load())
+        .ok_or_else(|| format!("{path} is not in the scanned tree"))
+}
+
+#[tauri::command]
+pub async fn overview_in_use(paths: Vec<String>) -> Result<Vec<InUse>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let targets: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        find_in_use(&targets)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn overview_delete(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    use_trash: bool,
+) -> Result<OverviewDeleteDone, String> {
+    let slot = state.overview.clone();
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let cfg = Config::load();
+        let mut guard = slot.lock().map_err(lock_err)?;
+        let tree = guard.as_mut().ok_or("nothing scanned yet")?;
+        let targets: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        let outcome = tree.delete_paths(&targets, &cfg, use_trash, |done, total, path| {
+            let _ = app2.emit(
+                "overview-delete-progress",
+                OverviewDeleteProgress {
+                    done,
+                    total,
+                    path: path.to_string(),
+                },
+            );
+        });
+        Ok(OverviewDeleteDone { outcome })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---------- Docker ----------
+
+#[tauri::command]
+pub async fn docker_inventory(days: u32) -> Result<DockerInventory, String> {
+    tauri::async_runtime::spawn_blocking(move || docker_inv(&Config::load(), days))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn run_docker_actions(actions: Vec<Action>) -> ApplySummary {
+    let mut cfg = Config::load();
+    cfg.apply = true;
+    let (log, summary) = execute_actions_parallel(&actions, &cfg, false, 1, |_| {});
+    let _ = write_report(&cfg, &[], &log);
+    summary
+}
+
+#[tauri::command]
+pub async fn docker_remove_images(ids: Vec<String>) -> Result<ApplySummary, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // Re-read the inventory so container usage is current, not from page load.
+        let cfg = Config::load();
+        let inv = docker_inv(&cfg, cfg.docker_unused_days);
+        if let Some(e) = inv.error {
+            return Err(e);
+        }
+        let actions = image_remove_actions(&inv.images, &ids)?;
+        Ok(run_docker_actions(actions))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn docker_prune_build_cache(days: u32, estimate_bytes: u64) -> Result<ApplySummary, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let action = Action::new(
+            "docker",
+            "docker_cmd",
+            "builder_prune",
+            estimate_bytes,
+            format!("build cache unused >{days}d"),
+        )
+        .with_command(builder_prune_command(days));
+        run_docker_actions(vec![action])
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn docker_tracker_install() -> Result<TrackerStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let bin = docker_track::find_cli_binary()
+            .ok_or("disk-cleaner CLI not found next to the app or on PATH")?;
+        docker_track::install(&bin)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn docker_tracker_uninstall() -> Result<TrackerStatus, String> {
+    tauri::async_runtime::spawn_blocking(docker_track::uninstall)
+        .await
+        .map_err(|e| e.to_string())?
 }

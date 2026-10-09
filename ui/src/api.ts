@@ -1,5 +1,28 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Action, ApplySummary, Config, DiskInfo, PhaseResult, TrashItem } from "./types";
+import {
+  mockDockerInventory,
+  mockDockerPruneCache,
+  mockDockerRemoveImages,
+  mockInUse,
+  mockListing,
+  mockOverviewDelete,
+  mockOverviewScan,
+  mockTracker,
+} from "./mocks";
+import type {
+  Action,
+  ApplySummary,
+  Config,
+  DeleteOutcome,
+  DirListing,
+  DiskInfo,
+  DockerInventory,
+  InUse,
+  OverviewScanDone,
+  PhaseResult,
+  TrackerStatus,
+  TrashItem,
+} from "./types";
 
 const browser = typeof window !== "undefined" && !(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
 
@@ -206,6 +229,60 @@ export async function apiFormatBytes(n: number): Promise<string> {
 export async function apiOpenPath(path: string): Promise<void> {
   if (browser) return;
   return invoke("open_path", { path });
+}
+
+export async function apiOverviewScan(path: string, crossFs: boolean): Promise<OverviewScanDone> {
+  if (browser) return mockOverviewScan(path);
+  return invoke("overview_scan", { path, crossFs });
+}
+
+export async function apiOverviewCancel(): Promise<void> {
+  if (browser) return;
+  return invoke("overview_cancel");
+}
+
+export async function apiOverviewList(path: string): Promise<DirListing> {
+  if (browser) return mockListing(path);
+  return invoke("overview_list", { path });
+}
+
+export async function apiOverviewInUse(paths: string[]): Promise<InUse[]> {
+  if (browser) return mockInUse(paths);
+  return invoke("overview_in_use", { paths });
+}
+
+export async function apiOverviewDelete(paths: string[], useTrash: boolean): Promise<{ outcome: DeleteOutcome }> {
+  if (browser) return { outcome: await mockOverviewDelete(paths, useTrash) };
+  return invoke("overview_delete", { paths, useTrash });
+}
+
+export async function apiDockerInventory(days: number): Promise<DockerInventory> {
+  if (browser) return mockDockerInventory(days);
+  return invoke("docker_inventory", { days });
+}
+
+function mockSummary(bytes: number, items: number): ApplySummary {
+  return { files_deleted: items, bytes_reclaimed: bytes, failures: 0, by_phase: [["docker", bytes]] };
+}
+
+export async function apiDockerRemoveImages(ids: string[]): Promise<ApplySummary> {
+  if (browser) return mockSummary(await mockDockerRemoveImages(ids), ids.length);
+  return invoke("docker_remove_images", { ids });
+}
+
+export async function apiDockerPruneBuildCache(days: number, estimateBytes: number): Promise<ApplySummary> {
+  if (browser) return mockSummary(await mockDockerPruneCache(), 1);
+  return invoke("docker_prune_build_cache", { days, estimateBytes });
+}
+
+export async function apiDockerTrackerInstall(): Promise<TrackerStatus> {
+  if (browser) return mockTracker(true);
+  return invoke("docker_tracker_install");
+}
+
+export async function apiDockerTrackerUninstall(): Promise<TrackerStatus> {
+  if (browser) return mockTracker(false);
+  return invoke("docker_tracker_uninstall");
 }
 
 /** Parse human sizes like `1mb`, `0.5kb`, `3.4Gb` (binary 1024ⁿ). Mirrors Rust `parse_size`. */

@@ -13,3 +13,5 @@ src-tauri/target/
 .env
 .env.*
 *.tsbuildinfo
+/ui/test-results/
+/ui/playwright-report/
