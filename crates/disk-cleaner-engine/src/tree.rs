@@ -5,7 +5,7 @@
 //! `cross_fs` is set; mount points below the root show up as `other_fs` entries.
 
 use crate::config::Config;
-use crate::safety::{manual_delete_block_reason, matches_protect, resolve_protect_globs};
+use crate::safety::{manual_delete_block_reason, matches_protect, resolve_protect_globs, DeleteGuard};
 use crate::trash::{force_remove_path, move_to_trash};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -418,6 +418,7 @@ impl SizeTree {
     pub fn listing(&self, path: &Path, cfg: &Config) -> Option<DirListing> {
         let node = self.find(path)?;
         let globs = resolve_protect_globs(cfg);
+        let guard = DeleteGuard::new(cfg).ok();
         let entries = node
             .children
             .iter()
@@ -430,7 +431,15 @@ impl SizeTree {
                 let blocked = match c.kind {
                     NodeKind::Collapsed => Some("aggregate of small files".to_string()),
                     NodeKind::OtherFs => Some("another filesystem (mount point)".to_string()),
-                    _ => manual_delete_block_reason(&child_path, &cfg.home),
+                    _ => manual_delete_block_reason(&child_path, &cfg.home).or_else(|| {
+                        match &guard {
+                            Some(g) if g.is_never_delete(&child_path) => {
+                                Some("matches a never-delete pattern".to_string())
+                            }
+                            Some(_) => None,
+                            None => Some("invalid never-delete pattern in settings".to_string()),
+                        }
+                    }),
                 };
                 let protected =
                     c.kind != NodeKind::Collapsed && matches_protect(&child_path, &globs);
@@ -489,6 +498,7 @@ impl SizeTree {
             trashed: use_trash,
             ..Default::default()
         };
+        let guard = DeleteGuard::new(cfg);
         let mut jobs: Vec<(PathBuf, u64)> = Vec::new();
         let mut seen: HashSet<PathBuf> = HashSet::new();
         // Children of a selected parent are redundant.
@@ -518,6 +528,20 @@ impl SizeTree {
             if let Some(reason) = manual_delete_block_reason(p, &cfg.home) {
                 outcome.failures.push(fail(reason));
                 continue;
+            }
+            match &guard {
+                Err(e) => {
+                    outcome.failures.push(fail(e.clone()));
+                    continue;
+                }
+                Ok(g) => {
+                    if let Some(hit) = g.never_delete_inside(p) {
+                        outcome
+                            .failures
+                            .push(fail(format!("never-delete pattern matches {}", hit.display())));
+                        continue;
+                    }
+                }
             }
             if use_trash && !same_filesystem(p, &cfg.home) {
                 outcome.failures.push(fail(

@@ -1,5 +1,6 @@
 use disk_cleaner_engine::action::{Action, ApplySummary, PhaseResult};
 use disk_cleaner_engine::config::Config;
+use disk_cleaner_engine::safety::compile_never_delete;
 use disk_cleaner_engine::disks::{list_disks as eng_disks, DiskInfo};
 use disk_cleaner_engine::execute::{default_apply_jobs, execute_actions_parallel};
 use disk_cleaner_engine::report::write_report;
@@ -66,6 +67,15 @@ pub struct ApplyDone {
     pub summary: ApplySummary,
 }
 
+/// Saved never-delete patterns always apply, even if the UI sent a stale config.
+fn merge_saved_never_delete(cfg: &mut Config) {
+    for p in Config::load().never_delete {
+        if !cfg.never_delete.contains(&p) {
+            cfg.never_delete.push(p);
+        }
+    }
+}
+
 #[tauri::command]
 pub fn get_config() -> Config {
     Config::load()
@@ -73,6 +83,7 @@ pub fn get_config() -> Config {
 
 #[tauri::command]
 pub fn save_config(config: Config) -> Result<(), String> {
+    compile_never_delete(&config.never_delete, &config.home)?;
     config.save().map_err(|e| e.to_string())
 }
 
@@ -110,6 +121,7 @@ pub async fn start_scan(
     mut config: Config,
 ) -> Result<ScanDone, String> {
     config.apply = false;
+    merge_saved_never_delete(&mut config);
     let app2 = app.clone();
     let results = tauri::async_runtime::spawn_blocking(move || {
         run_phases_parallel(
@@ -168,6 +180,7 @@ pub async fn apply_selected(
 ) -> Result<ApplyDone, String> {
     let mut cfg = config;
     cfg.apply = true;
+    merge_saved_never_delete(&mut cfg);
     let use_trash = cfg.gui_use_trash;
     let jobs = default_apply_jobs();
     let app2 = app.clone();

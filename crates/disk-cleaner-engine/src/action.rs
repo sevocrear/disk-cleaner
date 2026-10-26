@@ -13,6 +13,10 @@ pub struct Action {
     /// Stable id for UI selection
     #[serde(default)]
     pub id: String,
+    /// Dupes: the identical copy that stays. Deletion is refused unless it still exists
+    /// with the same content and is not deleted in the same run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep: Option<String>,
 }
 
 impl Action {
@@ -36,7 +40,13 @@ impl Action {
             detail,
             command: None,
             id,
+            keep: None,
         }
+    }
+
+    pub fn with_keep(mut self, keeper: impl Into<String>) -> Self {
+        self.keep = Some(keeper.into());
+        self
     }
 
     pub fn with_command(mut self, cmd: Vec<String>) -> Self {

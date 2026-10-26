@@ -1,10 +1,12 @@
 use crate::action::{Action, ApplyProgress, ApplyRecord, ApplySummary};
 use crate::cmd::run_command;
 use crate::config::Config;
+use crate::phases::dupes::keeper_still_identical;
+use crate::safety::DeleteGuard;
 use crate::trash::move_to_trash;
 use crate::util::parse_reclaimed_bytes;
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -60,6 +62,7 @@ where
     }
 
     let jobs = jobs.max(1);
+    let safety = ApplyGuard::new(actions, cfg);
     let records: Vec<Mutex<Option<ApplyRecord>>> =
         (0..actions.len()).map(|_| Mutex::new(None)).collect();
     let done = AtomicU64::new(0);
@@ -87,6 +90,7 @@ where
                 &actions[start..i],
                 start,
                 cfg,
+                &safety,
                 use_trash,
                 jobs,
                 &records,
@@ -97,7 +101,7 @@ where
             );
         } else {
             let action = &actions[i];
-            let rec = apply_one_record(action, cfg, use_trash);
+            let rec = apply_one_record(action, cfg, &safety, use_trash);
             account_record(&rec, &done, &bytes_reclaimed, &failures);
             let path = action.path.clone();
             if let Ok(mut slot) = records[i].lock() {
@@ -157,6 +161,7 @@ fn run_parallel_segment<N>(
     segment: &[Action],
     base_index: usize,
     cfg: &Config,
+    safety: &ApplyGuard,
     use_trash: bool,
     jobs: usize,
     records: &[Mutex<Option<ApplyRecord>>],
@@ -190,7 +195,7 @@ fn run_parallel_segment<N>(
                         break;
                     }
                     let action = &segment[local];
-                    let rec = apply_one_record(action, cfg.as_ref(), use_trash);
+                    let rec = apply_one_record(action, cfg.as_ref(), safety, use_trash);
                     account_record(&rec, done, bytes_reclaimed, failures);
                     let path = action.path.clone();
                     if let Ok(mut slot) = records[base_index + local].lock() {
@@ -236,8 +241,67 @@ fn summarize(log: &[ApplyRecord]) -> ApplySummary {
     summary
 }
 
-fn apply_one_record(action: &Action, cfg: &Config, use_trash: bool) -> ApplyRecord {
-    match apply_one(action, cfg, use_trash) {
+/// Last line of defense, checked right before each filesystem delete:
+/// `never_delete` patterns for every phase, system-file checks for automatic file scans,
+/// and dupes only while their kept copy survives unchanged.
+struct ApplyGuard {
+    guard: Result<DeleteGuard, String>,
+    /// Paths deleted in this run (a dupe's kept copy must not be among them).
+    deleting: HashSet<String>,
+}
+
+impl ApplyGuard {
+    fn new(actions: &[Action], cfg: &Config) -> Self {
+        Self {
+            guard: DeleteGuard::new(cfg),
+            deleting: actions
+                .iter()
+                .filter(|a| is_parallel_kind(&a.kind))
+                .map(|a| a.path.clone())
+                .collect(),
+        }
+    }
+
+    fn check(&self, action: &Action) -> Result<(), String> {
+        if !matches!(action.kind.as_str(), "delete_file" | "delete_tree" | "rmdir_if_empty") {
+            return Ok(());
+        }
+        let guard = self.guard.as_ref().map_err(|e| format!("refused: {e}"))?;
+        let p = Path::new(&action.path);
+        if action.kind == "delete_tree" {
+            if let Some(hit) = guard.never_delete_inside(p) {
+                return Err(format!("refused: contains never-delete path {}", hit.display()));
+            }
+        } else if guard.is_never_delete(p) {
+            return Err("refused: matches a never-delete pattern".into());
+        }
+        if action.kind == "delete_file" && matches!(action.phase.as_str(), "files" | "dupes" | "media")
+        {
+            if let Some(reason) = guard.file_block_reason(p) {
+                return Err(format!("refused: {reason}"));
+            }
+        }
+        if action.phase == "dupes" && action.kind == "delete_file" {
+            let keeper = action
+                .keep
+                .as_deref()
+                .ok_or("refused: duplicate without a kept copy")?;
+            if self.deleting.contains(keeper) {
+                return Err(format!("refused: kept copy {keeper} is also being deleted"));
+            }
+            keeper_still_identical(p, Path::new(keeper)).map_err(|e| format!("refused: {e}"))?;
+        }
+        Ok(())
+    }
+}
+
+fn apply_one_record(
+    action: &Action,
+    cfg: &Config,
+    safety: &ApplyGuard,
+    use_trash: bool,
+) -> ApplyRecord {
+    match safety.check(action).and_then(|()| apply_one(action, cfg, use_trash)) {
         Ok(rec) => rec,
         Err(e) => ApplyRecord {
             action: action.clone(),
@@ -453,5 +517,55 @@ mod tests {
         assert!(log[2].applied);
         assert!(!nested.exists());
         assert!(!dir.path().join("a").exists());
+    }
+
+    #[test]
+    fn guard_refuses_unsafe_deletes() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let d = dir.path().join("d");
+        fs::create_dir_all(&d).unwrap();
+        let w = |name: &str, data: &[u8]| {
+            let p = d.join(name);
+            fs::write(&p, data).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let keep_me = w("keep_me.bin", b"k");
+        let lib = w("libz.so.1", b"l");
+        let copy1 = w("copy1.bin", b"same");
+        let keeper1 = w("keeper1.bin", b"same");
+        let copy2 = w("copy2.bin", b"same2");
+        let keeper2 = w("keeper2.bin", b"same2");
+        let orphan = w("orphan.bin", b"o");
+
+        let mut cfg = apply_cfg(home);
+        cfg.never_delete = vec!["keep_me.*".into()];
+        let actions = vec![
+            Action::new("files", "delete_file", &keep_me, 1, "t"),
+            Action::new("files", "delete_file", &lib, 1, "t"),
+            Action::new("dupes", "delete_file", &copy1, 4, "t").with_keep(&keeper1),
+            // Kept copy of the second group is itself deleted in this run → refused.
+            Action::new("dupes", "delete_file", &copy2, 5, "t").with_keep(&keeper2),
+            Action::new("files", "delete_file", &keeper2, 5, "t"),
+            // Dupe without a recorded keeper → refused.
+            Action::new("dupes", "delete_file", &orphan, 1, "t"),
+        ];
+        let (log, _) = execute_actions_parallel(&actions, &cfg, false, 2, |_| {});
+        let applied: Vec<bool> = log.iter().map(|r| r.applied).collect();
+        assert_eq!(applied, vec![false, false, true, false, true, false]);
+        assert!(Path::new(&keep_me).exists());
+        assert!(Path::new(&lib).exists());
+        assert!(!Path::new(&copy1).exists());
+        assert!(Path::new(&keeper1).exists());
+        assert!(Path::new(&copy2).exists());
+        assert!(Path::new(&orphan).exists());
+
+        // Invalid pattern: every filesystem delete is refused.
+        cfg.never_delete = vec!["re:(".into()];
+        let actions = vec![Action::new("caches", "delete_file", &copy2, 5, "t")];
+        let (log, _) = execute_actions_parallel(&actions, &cfg, false, 1, |_| {});
+        assert!(!log[0].applied && log[0].error.is_some());
+        assert!(Path::new(&copy2).exists());
     }
 }

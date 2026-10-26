@@ -39,6 +39,7 @@ const mockConfig = (): Config => ({
   scan_mounts: ["/"],
   dedupe_roots: [],
   protect_globs: [],
+  never_delete: [],
   protect_apps: [],
   skip_docker: false,
   skip_caches: false,

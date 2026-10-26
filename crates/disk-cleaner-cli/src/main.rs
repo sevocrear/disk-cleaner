@@ -46,6 +46,10 @@ struct Cli {
     dedupe_roots: Vec<PathBuf>,
     #[arg(long = "protect", global = true)]
     protect_globs: Vec<String>,
+    /// Never delete paths matching this pattern (glob, or `re:<regex>`). Repeatable;
+    /// added to the `never_delete` list saved in the user config.
+    #[arg(long = "never-delete", global = true)]
+    never_delete: Vec<String>,
     #[arg(long = "protect-app", global = true)]
     protect_apps: Vec<String>,
     #[arg(long, global = true, default_value = "7d")]
@@ -136,6 +140,13 @@ fn config_from_cli(cli: &Cli) -> Result<Config, String> {
     cfg.extra_roots = cli.extra_roots.clone();
     cfg.dedupe_roots = cli.dedupe_roots.clone();
     cfg.protect_globs = cli.protect_globs.clone();
+    cfg.never_delete = Config::load().never_delete;
+    for p in &cli.never_delete {
+        if !cfg.never_delete.contains(p) {
+            cfg.never_delete.push(p.clone());
+        }
+    }
+    disk_cleaner_engine::safety::compile_never_delete(&cfg.never_delete, &cfg.home)?;
     cfg.protect_apps = cli.protect_apps.clone();
     cfg.journal_vacuum = cli.journal_vacuum.clone();
     cfg.include_docker_volumes = cli.include_docker_volumes;
