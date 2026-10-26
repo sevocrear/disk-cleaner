@@ -124,10 +124,28 @@ container starts from `docker events`.
 - Overview warns before deleting paths that running programs use
 - Docker images that still have a container (running or stopped) are never removed
 - Protect globs for SSH keys, browsers, Hugging Face caches (HF opt-in)
+- Duplicates / old files / media scans never touch: git (and hg/svn) repos, Python venvs and
+  conda envs, `node_modules`, `site-packages`, OS trees on other disks, hidden files and folders,
+  libraries (`.so`, `.so.N`, `.a`, `.dll`, …), ELF binaries and scripts, package archives
+  (`.conda`, `.deb`, …), configs, keys, databases and VM disks
+- Every delete is re-checked right before it happens; a duplicate is deleted only while its
+  kept copy still exists with identical content and is not deleted in the same run
+- **Never delete** patterns (Settings, or `--never-delete` in the CLI) apply to every cleanup,
+  including Overview. One per line; glob by default, `re:` prefix for a regex on the full path:
+
+  ```text
+  ~/projects          # a folder and everything inside it
+  path/*.py           # .py files directly in any folder named "path"
+  data/**/*.csv       # .csv at any depth under any "data" folder
+  *.co*               # any name with ".co" (.conda, .config, …)
+  re:/media/.*\.iso$  # regex
+  ```
+
+  An invalid pattern stops the scan instead of being ignored.
 - GUI defaults to **move to Trash**; permanent delete is a setting
 - CLI `--apply` deletes permanently (same model as classic host cleaners)
 
-Config lives at `~/.config/disk-cleaner/config.toml`.
+Config lives at `~/.config/disk-cleaner/config.toml` (`never_delete = [...]`).
 
 ---
 

@@ -6,6 +6,8 @@ export type Action = {
   detail: string;
   command?: string[] | null;
   id: string;
+  /** Dupes: the identical copy that is kept. */
+  keep?: string | null;
 };
 
 export type PhaseResult = {
@@ -29,6 +31,8 @@ export type Config = {
   scan_mounts: string[];
   dedupe_roots: string[];
   protect_globs: string[];
+  /** Never deleted by any cleanup. Glob (`*`, `**`, `?`, `~/`) or `re:<regex>`. */
+  never_delete: string[];
   protect_apps: string[];
   skip_docker: boolean;
   skip_caches: boolean;

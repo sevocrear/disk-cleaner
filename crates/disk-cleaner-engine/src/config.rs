@@ -29,6 +29,10 @@ pub struct Config {
     pub dedupe_roots: Vec<PathBuf>,
     #[serde(default)]
     pub protect_globs: Vec<String>,
+    /// User patterns for paths that are never deleted by any cleanup (dupes, old files, …).
+    /// Glob by default (`*`, `**`, `?`, leading `~/`); `re:<regex>` for a regex on the full path.
+    #[serde(default)]
+    pub never_delete: Vec<String>,
     #[serde(default)]
     pub protect_apps: Vec<String>,
     #[serde(default)]
@@ -123,6 +127,7 @@ impl Default for Config {
             scan_mounts: default_scan_mounts(),
             dedupe_roots: vec![],
             protect_globs: vec![],
+            never_delete: vec![],
             protect_apps: vec![],
             skip_docker: false,
             skip_caches: false,

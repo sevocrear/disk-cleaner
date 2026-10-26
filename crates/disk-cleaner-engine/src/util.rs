@@ -131,6 +131,14 @@ pub fn unused_volume_bytes_from_df_v(stdout: &str) -> (u64, usize) {
 }
 
 pub fn iter_files(root: &Path, cross_fs: bool) -> Vec<PathBuf> {
+    iter_files_filtered(root, cross_fs, |_| false)
+}
+
+/// Like [`iter_files`], but does not descend into directories for which `skip_dir` is true.
+pub fn iter_files_filtered<F>(root: &Path, cross_fs: bool, skip_dir: F) -> Vec<PathBuf>
+where
+    F: Fn(&Path) -> bool,
+{
     let mut out = Vec::new();
     if !root.exists() {
         return out;
@@ -155,7 +163,7 @@ pub fn iter_files(root: &Path, cross_fs: bool) -> Vec<PathBuf> {
                 continue;
             }
             if ft.is_dir() {
-                if path_is_denied(&path) {
+                if path_is_denied(&path) || skip_dir(&path) {
                     continue;
                 }
                 if !cross_fs {

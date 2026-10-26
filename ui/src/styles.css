@@ -475,12 +475,27 @@ button {
 }
 
 .field input,
-.field select {
+.field select,
+.field textarea {
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px solid var(--line);
   background: white;
   color: var(--ink);
+}
+
+.field textarea {
+  font-family: ui-monospace, monospace;
+  font-size: 0.85rem;
+  resize: vertical;
+}
+
+.never-delete {
+  margin: 0 0 14px;
+}
+
+.never-delete small {
+  color: var(--muted);
 }
 
 .check {

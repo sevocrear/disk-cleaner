@@ -156,6 +156,8 @@ const SETTING_TIPS: Record<string, string> = {
     "GUI clean moves items to Trash instead of permanent delete. You can restore from the Trash panel.",
   "Include Docker volumes":
     "Also remove unused Docker volumes (named and anonymous). Off by default — volumes can hold app data.",
+  "Never delete":
+    "One pattern per line. Matching files and folders are never deleted by any cleanup (duplicates, old files, media, caches, Overview). Glob: * within a folder, ** any depth, ? one char, ~/ = home. Without / it matches any file or folder name (*.py, secrets); with / it matches the end of a path (path/*.py, data/**/*.csv); starting with / or ~/ it is absolute (~/projects). Prefix re: for a regex on the full path (re:\\.co[a-z]*$). A folder match protects everything inside it.",
   "Allow HuggingFace / torch cache cleanup":
     "Allow reclaiming HuggingFace / torch / transformers caches that are normally protected.",
 };
@@ -1003,6 +1005,7 @@ function SettingsPanel({
   const [minDupeText, setMinDupeText] = useState(() => formatBytesLocal(config.min_dupe_size));
   const [confirmText, setConfirmText] = useState(() => formatBytesLocal(config.confirm_above));
   const [sizeError, setSizeError] = useState<string | null>(null);
+  const [neverText, setNeverText] = useState(() => (config.never_delete ?? []).join("\n"));
 
   useEffect(() => {
     setMinFileText(formatBytesLocal(config.min_file_size));
@@ -1025,6 +1028,10 @@ function SettingsPanel({
     setSizeError(null);
     const next = {
       ...config,
+      never_delete: neverText
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean),
       min_file_size: minFile,
       min_dupe_size: minDupe,
       confirm_above: confirm,
@@ -1118,6 +1125,21 @@ function SettingsPanel({
       {sizeError && (
         <p style={{ color: "#7a4545", margin: "0 0 12px" }}>{sizeError}</p>
       )}
+      <div className="field never-delete">
+        <TipLabel text="Never delete (patterns)" tip={SETTING_TIPS["Never delete"]} />
+        <textarea
+          aria-label="Never delete patterns"
+          rows={5}
+          spellCheck={false}
+          placeholder={"~/projects\npath/*.py\n*.co*\nre:/data/.*\\.(iso|img)$"}
+          value={neverText}
+          onChange={(e) => setNeverText(e.target.value)}
+        />
+        <small>
+          Always protected as well: system dirs, git repos, Python/conda envs, hidden files,
+          libraries (.so), executables, configs and databases.
+        </small>
+      </div>
       <div>
         <CheckOption
           label="Move cleaned files to Trash (safer)"

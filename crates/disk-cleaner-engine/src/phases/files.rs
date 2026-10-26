@@ -1,34 +1,42 @@
 use crate::action::{Action, PhaseResult};
 use crate::config::Config;
-use crate::safety::{default_file_roots, matches_protect, path_is_denied, resolve_protect_globs};
-use crate::util::{days_to_seconds, file_age_ok_for_delete, iter_files, now_ts};
+use crate::safety::{default_file_roots, DeleteGuard};
+use crate::util::{days_to_seconds, file_age_ok_for_delete, iter_files_filtered, now_ts};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 pub fn phase_files(cfg: &Config) -> PhaseResult {
     let mut result = PhaseResult::new("files");
-    let protect = resolve_protect_globs(cfg);
+    let guard = match DeleteGuard::new(cfg) {
+        Ok(g) => g,
+        Err(e) => {
+            result.notes.push(format!("scan refused: {e}"));
+            return result;
+        }
+    };
     let cutoff = now_ts() - days_to_seconds(cfg.file_unused_days);
     let roots = default_file_roots(cfg);
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     for root in &roots {
-        if path_is_denied(root) {
-            result.notes.push(format!("denied root skipped: {}", root.display()));
-            continue;
-        }
         if !root.exists() {
             continue;
         }
-        for f in iter_files(root, cfg.cross_fs) {
-            if path_is_denied(&f) || matches_protect(&f, &protect) {
-                continue;
-            }
+        if let Some(reason) = guard.root_block_reason(root) {
+            result
+                .notes
+                .push(format!("protected root skipped: {} ({reason})", root.display()));
+            continue;
+        }
+        for f in iter_files_filtered(root, cfg.cross_fs, |d| guard.skip_dir(d)) {
             let Ok(meta) = std::fs::metadata(&f) else { continue };
             if meta.len() < cfg.min_file_size {
                 continue;
             }
             if !file_age_ok_for_delete(&f, cutoff) {
+                continue;
+            }
+            if guard.file_block_reason(&f).is_some() {
                 continue;
             }
             candidates.push(f.clone());
